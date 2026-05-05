@@ -21,7 +21,6 @@
     "release": "node scripts/release.mjs"
   },
   "dependencies": {
-    "@nut-tree-fork/nut-js": "^4.2.6",
     "electron-updater": "^6.3.9",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
@@ -48,11 +47,7 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "electron",
-      "esbuild",
-      "@nut-tree-fork/libnut",
-      "@nut-tree-fork/libnut-darwin",
-      "@nut-tree-fork/libnut-linux",
-      "@nut-tree-fork/libnut-win32"
+      "esbuild"
     ]
   }
 }

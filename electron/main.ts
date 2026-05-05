@@ -27,15 +27,9 @@ import {
   shell,
   ipcMain,
   Menu,
-  dialog,
-  systemPreferences,
 } from 'electron';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { keyboard, Key } from '@nut-tree-fork/nut-js';
-
-// nut-js 默认 100ms autoDelay 让组合键有空隙;我们快捷键路径要快,5ms 够稳
-keyboard.config.autoDelayMs = 5;
 import { setupAutoUpdater } from './updater';
 import * as vocabulary from './vocabulary';
 import * as auth from './auth';
@@ -92,20 +86,8 @@ const POPOVER_BLUR_HIDE_DELAY_MS = 500;
  */
 const POPOVER_SETBOUNDS_GRACE_MS = 200;
 
-/**
- * 模拟 Cmd+C 的兜底超时(ms)。
- *
- * macOS 上若 Accessibility 没授权,osascript 会卡住等用户响应系统弹窗 —— 我们不能阻塞快捷键。
- * Linux 下 xdotool 失败也走这个超时。
- */
-const SIMULATE_COPY_TIMEOUT_MS = 600;
-
-/** 模拟 Cmd+C 后等剪贴板传播的延时(ms);太短会读到旧内容 */
-const CLIPBOARD_PROPAGATE_MS = 120;
-
-/** macOS Accessibility 设置面板的系统 URL */
-const MAC_ACCESSIBILITY_PREF_URL =
-  'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility';
+/** 剪贴板 polling 间隔(ms)— Electron 没原生 clipboard event,polling 是唯一手段 */
+const CLIPBOARD_POLL_MS = 400;
 
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
 const RENDERER_DIST = path.join(__dirname, '..', 'dist');
@@ -491,87 +473,64 @@ function isValidEnglishWord(text: string): string | null {
  * 想看看 popover 又关掉了想再看一眼),不再依赖 lastQueriedWord 比对。
  */
 /**
- * 模拟系统 copy —— 选中即查的核心。
+ * 智能剪贴板模式 —— LangCat 的核心触发流(MVP 阶段)
  *
- * 全平台用 nut-js native module(libnut → CGEventPost on macOS / SendInput on
- * Windows / X11 XTest on Linux)。**关键**:nut-js 是 LangCat 主进程内调用的
- * native function,不像 spawn(osascript) 是 child process,所以 macOS TCC
- * 权限挂在 LangCat.app 自己 binary 上 —— 用户授权 LangCat 辅助功能后即生效,
- * 不需要单独授权 osascript。
+ * 历史选型回顾:
+ *   - 第一版:剪贴板变化即弹 → 误触发太多(复制中文也弹)
+ *   - 第二版:Cmd+Shift+/ 触发 osascript 模拟 Cmd+C → macOS TCC 子进程不继承父权限,silent fail
+ *   - 第三版:nut-js native module 模拟 Cmd+C → 权限挂 LangCat 但 macOS TCC 缓存按二进制 hash,
+ *            每次新版升级权限失效,且 native module 让 build 复杂
+ *   - **当前(第四版):智能剪贴板 watcher + 严格白名单过滤**
  *
- * 早版本用过的 spawn osascript / xdotool 路径已撤回 —— osascript 子进程不能
- * 继承父 app 权限,产品体验崩坏。
+ * 工作流:
+ *   1. 用户选中英文词 → ⌘C(系统标准复制,LangCat 不拦截不模拟)
+ *   2. LangCat 后台 polling(CLIPBOARD_POLL_MS=400ms)看 clipboard.readText()
+ *   3. 内容变化时,过 isValidEnglishWord 严格白名单:
+ *      - 长度 2-50 字母,无空格,可有连字符 → 弹 popover
+ *      - 中文 / 句子 / URL / 数字 / 长串 → 不弹(不打扰)
+ *   4. 同一词反复复制不重弹(lastQueriedWord 比对)
+ *
+ * 优势:
+ *   - 0 macOS 权限要求(剪贴板 read 是公共能力)
+ *   - 不依赖 native module,build 简单
+ *   - 单步操作:⌘C 即弹
+ *   - 严格过滤把误触发降到极低(99% 复制都不是英文单词)
+ *
+ * Cmd+Shift+/ 仍保留作为"召回快捷键":
+ *   - 用户关闭 popover 后想再看一眼 → 按快捷键重弹 lastQueriedWord
+ *   - 直接读 clipboard,不模拟任何键盘事件,不依赖 TCC
  */
-async function simulateCopy(): Promise<void> {
-  try {
-    if (process.platform === 'darwin') {
-      await keyboard.type(Key.LeftCmd, Key.C);
-    } else {
-      // Linux + Windows: Ctrl+C
-      await keyboard.type(Key.LeftControl, Key.C);
-    }
-  } catch (e: unknown) {
-    // 失败不阻塞 — 仍然 fallback 读现有剪贴板。常见失败:macOS 辅助功能
-    // 权限没授权;tryHandleHotkey 会在没读到合法词时弹引导对话框
-    const msg = e instanceof Error ? e.message : String(e);
-    console.warn('[simulateCopy] nut-js failed:', msg);
-  }
-}
 
-/** Accessibility 引导对话框只在每个进程生命周期内弹一次,避免打扰 */
-let accessibilityHelpShown = false;
+/** 上次见到的剪贴板文本,polling 时跟当前比对判断"变化" */
+let lastClipboardSeen = '';
+
+function tickClipboardWatch(): void {
+  const clip = clipboard.readText();
+  if (clip === lastClipboardSeen) return;
+  lastClipboardSeen = clip;
+
+  const word = isValidEnglishWord(clip);
+  if (word === null) return; // 严格过滤:不是单个英文词就不弹
+  if (word === lastQueriedWord) return; // 同一词反复复制不打扰
+
+  showPopoverFor(word);
+}
 
 /**
- * macOS:nut-js 模拟 Cmd+C 没读到合法词时,可能是辅助功能没授权。
+ * 全局快捷键 ⌘+Shift+/ —— "召回 / 备份触发"。
  *
- * nut-js 内部用 CGEventPost,权限挂在 LangCat.app 自己。用户没授权时,
- * keystroke 会被 macOS 系统级拦截(不一定 throw,可能 silent 不发送),
- * 表现是剪贴板没变,我们读到旧内容 / 空。
- *
- * 弹一次性引导 + 一键直跳系统设置面板。授权后 nut-js 立即 work,无需重启。
+ * 不再尝试模拟 Cmd+C(nut-js / osascript 路线已撤);单纯读当前剪贴板:
+ *   - 剪贴板里是合法英文词 + 不是上次的 → 弹这个词(等价手动触发剪贴板 watcher)
+ *   - 不是合法词 / 跟上次相同 → 重弹 lastQueriedWord(用户关掉了想再看一眼)
+ *   - 没 lastQueriedWord 也没合法剪贴板 → 静默(不弹空 popover)
  */
-function maybeShowAccessibilityHelp(): void {
-  if (process.platform !== 'darwin') return;
-  if (accessibilityHelpShown) return;
-  // false = 只查询,不弹系统对话框(后者在 SIP 严格的版本上会卡)
-  const trusted = systemPreferences.isTrustedAccessibilityClient(false);
-  if (trusted) return; // 已授权就不打扰(可能用户只是没选中文字)
-  accessibilityHelpShown = true;
-  void dialog
-    .showMessageBox({
-      type: 'warning',
-      buttons: ['打开系统设置', '稍后'],
-      defaultId: 0,
-      cancelId: 1,
-      title: 'LangCat 需要辅助功能权限',
-      message: '快捷键没读到你选中的单词',
-      detail:
-        '"选中即查"需要"辅助功能 (Accessibility)"权限才能模拟 ⌘+C 读取选中内容。\n\n' +
-        '请打开:系统设置 → 隐私与安全 → 辅助功能 → 把 LangCat 打开。\n\n' +
-        '授权后无需重启 LangCat,直接再按一次快捷键即可。',
-    })
-    .then(({ response }) => {
-      if (response === 0) {
-        void shell.openExternal(MAC_ACCESSIBILITY_PREF_URL);
-      }
-    });
-}
-
-async function tryHandleHotkey(): Promise<void> {
-  // Linux 上 xdotool 模拟 Ctrl+C(macOS 跳过,见 simulateCopy 注释)
-  await simulateCopy();
-  await new Promise((r) => setTimeout(r, CLIPBOARD_PROPAGATE_MS));
-
+function tryHandleHotkey(): void {
   const clip = clipboard.readText();
   const word = isValidEnglishWord(clip);
-  if (word !== null) {
+  if (word !== null && word !== lastQueriedWord) {
     showPopoverFor(word);
     return;
   }
-  // 没读到合法英文词。可能:
-  //   - macOS 辅助功能没授权 → 弹一次性引导(只在没授权时,不打扰已授权用户)
-  //   - 用户没选中文字 / 选中的不是英文 → 用 lastQueriedWord "再看一眼"
-  maybeShowAccessibilityHelp();
   if (lastQueriedWord !== null) {
     showPopoverFor(lastQueriedWord);
   }
@@ -766,62 +725,8 @@ async function langcatFetch(
   return resp;
 }
 
-/* ──────────────────────────────────────────────────────────── */
-/*  macOS 专属:Accessibility 权限引导                           */
-/* ──────────────────────────────────────────────────────────── */
-
-/**
- * 检测 + 引导 macOS Accessibility 权限。
- *
- * 为啥要这个权限:hotkey 触发时主进程会 osascript 模拟 Cmd+C(把用户当前选中的文字
- * 写进剪贴板,然后查词)—— 这是"系统级模拟按键",macOS 必须通过 System Settings →
- * Privacy & Security → Accessibility 显式授权 LangCat 才能用,否则 osascript 会
- * 卡住等用户响应系统弹窗(我们已经设了 SIMULATE_COPY_TIMEOUT_MS 兜底,但用户体验是
- * "按快捷键没反应")。
- *
- * 用 systemPreferences.isTrustedAccessibilityClient(false):
- *   - 参数 false = "只查询,别弹系统弹窗"
- *   - 参数 true 会弹系统的"要给 LangCat 权限吗"对话框,但那个对话框很丑、文字简短,
- *     用户经常直接关掉。我们用 false 查询 + 自己的友好对话框引导,体验更好。
- *
- * 仅 macOS 调用;Linux 用 xdotool 不需要 Accessibility 权限,Windows 暂未模拟。
- * 规则 4:不写"反正其他平台调用也没事"的兜底,显式 platform 分支。
- */
-function checkMacAccessibilityPermission(): void {
-  if (process.platform !== 'darwin') return;
-  // false = 不弹系统弹窗,只查询当前授权状态
-  const trusted = systemPreferences.isTrustedAccessibilityClient(false);
-  if (trusted) {
-    console.info('[LangCat] macOS Accessibility 已授权');
-    return;
-  }
-  console.warn('[LangCat] macOS Accessibility 未授权,引导用户去系统设置开启');
-
-  // 异步弹引导对话框,不阻塞 app.whenReady。
-  // 用户即使不授权也能用 LangCat —— 只是必须先 Cmd+C 复制再按快捷键(纯剪贴板模式)。
-  void dialog
-    .showMessageBox({
-      type: 'info',
-      title: 'LangCat 需要辅助功能权限',
-      message: '允许 LangCat 读取你当前选中的英文词',
-      detail:
-        '为了让快捷键(⌘+Shift+/)能直接读取你在任何应用里选中的文字,' +
-        'LangCat 需要"辅助功能(Accessibility)"权限。\n\n' +
-        '不开权限也能用,但你需要先按 ⌘+C 把词复制到剪贴板,再按快捷键查词。\n\n' +
-        '点"打开系统设置"会跳到 系统设置 → 隐私与安全性 → 辅助功能,' +
-        '在列表里找到 LangCat 并打开开关即可。',
-      buttons: ['打开系统设置', '先跳过'],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true,
-    })
-    .then(({ response }) => {
-      if (response === 0) {
-        void shell.openExternal(MAC_ACCESSIBILITY_PREF_URL);
-      }
-    })
-    .catch((err) => console.warn('[LangCat] Accessibility 引导对话框失败:', err));
-}
+// 早版本 macOS 辅助功能权限引导已移除 —— v0.5.0 起改纯剪贴板智能 watcher 模式,
+// 不再模拟键盘,不需要 Accessibility 权限。
 
 /* ──────────────────────────────────────────────────────────── */
 /*  生命周期                                                     */
@@ -846,11 +751,13 @@ app.whenReady().then(() => {
   createMainWindow();
   createPopoverWindow();
 
-  // macOS:启动时检测辅助功能授权,未授权弹引导对话框。
-  // 在 createMainWindow 之后调,这样对话框有 parent 概念(即使不传 parent 也是 modal)。
-  checkMacAccessibilityPermission();
+  // 启动时把当前剪贴板内容当 baseline,避免 LangCat 一启动就误弹(用户启动前复制的旧内容不该弹)
+  lastClipboardSeen = clipboard.readText();
 
-  // 全局快捷键 — 触发查词 popover
+  // 智能剪贴板 watcher:每 CLIPBOARD_POLL_MS 看一眼,内容变 + 是合法英文词 → 弹 popover
+  const clipboardTimer = setInterval(tickClipboardWatch, CLIPBOARD_POLL_MS);
+
+  // 全局快捷键 — 召回 popover(⌘+Shift+/),不再模拟 Cmd+C
   const ok = globalShortcut.register(SHORTCUT_LOOKUP, tryHandleHotkey);
   if (!ok) {
     console.error(
@@ -862,6 +769,7 @@ app.whenReady().then(() => {
   }
 
   app.on('will-quit', () => {
+    clearInterval(clipboardTimer);
     globalShortcut.unregisterAll();
   });
 
