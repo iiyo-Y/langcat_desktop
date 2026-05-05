@@ -56,6 +56,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # 从 build/icon.png(1024x1024)显式生成各平台原生图标:
+      #   - macOS 需要 .icns(否则 Dock 不显示 icon,默认变灰白电子图标)
+      #   - Windows 需要 .ico(NSIS installer 要)
+      # electron-builder 默认会从 PNG 自动转,但实测某些尺寸 / alpha 处理有问题。
+      # png2icons 是纯 JS 跨平台库,不引入原生编译依赖,一行命令搞定。
+      - name: Generate native icons (.icns / .ico)
+        run: |
+          npx --yes png2icons build/icon.png build/icon -allp
+          ls -la build/
+
       # 关键:把 git tag (例如 refs/tags/v0.1.1 → 0.1.1) 同步进 package.json version。
       # electron-builder 用 package.json.version 拼 release tag 名(v0.1.0),
       # 跟 push 上来的 git tag 不一致就会去找/创建错误的 release,产物 silent

@@ -30,6 +30,7 @@ import {
 } from 'electron';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { setupAutoUpdater } from './updater';
 import * as vocabulary from './vocabulary';
 import * as auth from './auth';
@@ -303,19 +304,65 @@ function isValidEnglishWord(text: string): string | null {
 }
 
 /**
- * 全局快捷键 Ctrl+Shift+/ 的处理:读当前剪贴板,合法英文词就弹 popover;
- * 不合法就重弹上一次查的词(让用户"再看一眼")。
+ * 全局快捷键 Ctrl+Shift+/ 的处理:
  *
- * 用户的工作流是:选中词 → Ctrl+C → Ctrl+Shift+/。复制和弹窗解耦,Ctrl+C
- * 不再触发查询(避免普通复制误触发)。
+ *   1. macOS / Linux:先模拟 Cmd+C / Ctrl+C,把用户当前选中的内容写进剪贴板;
+ *      然后读剪贴板拿到刚选的词,弹 popover。
+ *      → 用户体验:选中词 → 按快捷键 = 立刻弹新词(不需要先 Cmd+C)。
+ *   2. Windows:暂用纯剪贴板模式(用户先 Ctrl+C 再 Ctrl+Shift+/),后续可加
+ *      PowerShell SendKeys 模拟。
+ *   3. 模拟失败 / Windows / 没合法词 → fallback 读现有剪贴板。
+ *
+ * 模拟 Cmd+C 用 osascript(macOS 内置)/ xdotool(Linux X11),不引入原生模块。
+ * macOS 首次会弹 Accessibility 权限请求,这是合理的(任何"读取选中"的工具都要)。
+ *
+ * 同一词多次按快捷键不再误判:上一个词跟新剪贴板内容相同时正常重弹(用户可能
+ * 想看看 popover 又关掉了想再看一眼),不再依赖 lastQueriedWord 比对。
  */
-function tryHandleHotkey(): void {
+function simulateCopy(): Promise<void> {
+  return new Promise((resolve) => {
+    let cmd: string;
+    let args: string[];
+    if (process.platform === 'darwin') {
+      cmd = 'osascript';
+      args = ['-e', 'tell application "System Events" to keystroke "c" using command down'];
+    } else if (process.platform === 'linux') {
+      cmd = 'xdotool';
+      args = ['key', '--clearmodifiers', 'ctrl+c'];
+    } else {
+      // Windows 暂不模拟,直接 resolve
+      resolve();
+      return;
+    }
+    try {
+      const proc = spawn(cmd, args, { stdio: 'ignore' });
+      // 模拟失败(命令不存在 / 权限不够)不阻塞,fallback 到现有剪贴板
+      proc.on('error', () => resolve());
+      proc.on('exit', () => resolve());
+      // 兜底超时 200ms — Accessibility 没授权时 osascript 卡住
+      setTimeout(() => {
+        try { proc.kill(); } catch {}
+        resolve();
+      }, 200);
+    } catch {
+      resolve();
+    }
+  });
+}
+
+async function tryHandleHotkey(): Promise<void> {
+  // 模拟系统 copy,等剪贴板传播 ~50ms 再读
+  await simulateCopy();
+  await new Promise((r) => setTimeout(r, 50));
+
   const clip = clipboard.readText();
   const word = isValidEnglishWord(clip);
   if (word !== null) {
     showPopoverFor(word);
     return;
   }
+  // 剪贴板里不是英文词(可能用户没选中文字 / 选了中文 / 选了一句话):
+  // 重弹上次查询,让用户"再看一眼"
   if (lastQueriedWord !== null) {
     showPopoverFor(lastQueriedWord);
   }

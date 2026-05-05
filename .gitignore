@@ -13,3 +13,7 @@ release/
 .env.backup.*
 .DS_Store
 *.log
+
+# CI 上 release.yml 跑 png2icons 从 build/icon.png 生成,不入 git
+build/icon.icns
+build/icon.ico
