@@ -27,6 +27,8 @@ import {
   shell,
   ipcMain,
   Menu,
+  dialog,
+  systemPreferences,
 } from 'electron';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -66,6 +68,42 @@ const POPOVER_BOTTOM_MARGIN = 96;
 /** popover 显示后多久自动隐藏(ms);新查询会重置计时 */
 const POPOVER_AUTO_HIDE_MS = 8000;
 
+/**
+ * macOS 专属:popover 失焦后多久自动隐藏(ms)。
+ *
+ * 这是 macOS spotlight / alfred / 通知中心等系统浮窗的标准行为 —— 用户点击别处即关闭。
+ * 给 500ms 缓冲是因为:用户可能从 popover 切到别的窗口拷贝内容、再切回 popover,
+ * 这种"短暂离开"不应该误隐;如果真的离开 0.5s 没回来,认定用户已经看完。
+ *
+ * 注意:仅 macOS 启用。Linux Wayland 下 blur 事件不可靠(有时窗口在前台也会 spurious blur),
+ * 强行启用会误隐;Windows 也暂不启用,等真有用户反馈再说。
+ */
+const POPOVER_BLUR_HIDE_DELAY_MS = 500;
+
+/**
+ * 'moved' / 'resized' 事件的"系统触发"窗口期(ms)。
+ *
+ * setBounds() 在 macOS / Linux 下都会触发 'moved' 事件;我们用这个时间窗区分
+ * "系统刚 setBounds 导致的 moved"vs"用户拖动导致的 moved"。
+ * 200ms 是经验值:setBounds 异步派发 moved 通常 < 50ms,留 4 倍裕量。
+ */
+const POPOVER_SETBOUNDS_GRACE_MS = 200;
+
+/**
+ * 模拟 Cmd+C 的兜底超时(ms)。
+ *
+ * macOS 上若 Accessibility 没授权,osascript 会卡住等用户响应系统弹窗 —— 我们不能阻塞快捷键。
+ * Linux 下 xdotool 失败也走这个超时。
+ */
+const SIMULATE_COPY_TIMEOUT_MS = 200;
+
+/** 模拟 Cmd+C 后等剪贴板传播的延时(ms);太短会读到旧内容 */
+const CLIPBOARD_PROPAGATE_MS = 50;
+
+/** macOS Accessibility 设置面板的系统 URL */
+const MAC_ACCESSIBILITY_PREF_URL =
+  'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility';
+
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
 const RENDERER_DIST = path.join(__dirname, '..', 'dist');
 const PRELOAD_PATH = path.join(__dirname, 'preload.cjs');
@@ -100,6 +138,10 @@ let mainWindow: BrowserWindow | null = null;
 let popoverWindow: BrowserWindow | null = null;
 /** popover 自动隐藏的 timer;每次新查询重置 */
 let popoverAutoHideTimer: ReturnType<typeof setTimeout> | null = null;
+/** popover 失焦自动隐藏的 timer(仅 macOS);focus 时清掉 */
+let popoverBlurHideTimer: ReturnType<typeof setTimeout> | null = null;
+/** 上次 setBounds 的时间戳,用于区分 'moved' 事件来源(系统 vs 用户拖) */
+let popoverLastShowAt = 0;
 
 /**
  * 用户上次手动拖动到的 popover 位置(整个 app 生命周期内记住)。
@@ -189,51 +231,140 @@ function createPopoverWindow(): void {
     },
   });
 
-  // 浮窗在所有 workspace 都显示,叠在全屏应用之上
+  // 浮窗在所有 workspace 都显示,叠在全屏应用之上。
+  // 注意:macOS 上 hide() 后这个状态会被系统重置 —— 每次 show 前必须重新 setVisibleOnAllWorkspaces,
+  // 否则二次 show 时窗口虽然 visible,但只在当前 workspace 显示、且不再叠在全屏应用之上。
   popoverWindow.setVisibleOnAllWorkspaces(true, {
     visibleOnFullScreen: true,
   });
 
   loadView(popoverWindow, '/popover');
 
-  // DEBUG 阶段:popover 出来后**只能**靠用户主动 ✕ / ESC 关闭。
-  // 之前 blur 自动 hide + 8 秒超时 hide 在 debug 词素拆解时太干扰(用户还没看完就消失)。
-  // 等产品稳定后再加回"鼠标久离 popover 自动消失"等优雅行为。
-  // popoverWindow.on('blur', () => popoverWindow?.hide());
+  // popover 给一个独立的空菜单 —— 这是 macOS 上 Cmd+W bug 的关键修复:
+  // macOS 全局菜单的"File → Close Window"默认 accelerator = Cmd+W,被路由到当前 focus 的窗口。
+  // 之前 setApplicationMenu(null) 后 macOS 仍保留系统最小菜单,Cmd+W 触发的 close 路径在
+  // frameless transparent 窗口上有时绕过 'close' 事件的 preventDefault,导致 webContents
+  // 被销毁/标记 destroyed,后续 setBounds / showInactive 静默失败 → 用户报告"hotkey 不再弹"。
+  // 给 popover 单独 setMenu(null) + 在 webContents 拦截 Cmd+W,统一走 hide。
+  popoverWindow.setMenu(null);
+
+  // 在 popover focus 时拦截 Cmd+W / Ctrl+W:走 hide,而不是触发系统 close
+  popoverWindow.webContents.on('before-input-event', (event, input) => {
+    // before-input-event 是 keydown/keyup;只看 keydown 防重复
+    if (input.type !== 'keyDown') return;
+    const isCmdOrCtrl = process.platform === 'darwin' ? input.meta : input.control;
+    if (isCmdOrCtrl && input.key.toLowerCase() === 'w') {
+      event.preventDefault();
+      popoverWindow?.hide();
+    }
+    // ESC 也在这里兜底拦截 —— 渲染层应该已经处理,这里是双保险
+    if (input.key === 'Escape') {
+      event.preventDefault();
+      popoverWindow?.hide();
+    }
+  });
 
   // 用户拖动 popover 到任意位置 → 记住坐标,下次弹出在那。
   // 'moved' 事件在 setBounds() 调用时也会触发,需区分"系统设位置"vs"用户拖":
-  // 给 popoverWindow 临时打个 isUserMoving 标志(showPopoverFor 设 false,
-  // 拖动 mousedown/mouseup 在 renderer 端设 true,但 frameless 上 mousedown 全局
-  // 事件不易拿)。简单做法:show 后 100ms 内的 'moved' 当作"系统",其后是用户。
-  let lastShowAt = 0;
+  // 简单做法 —— show 后 POPOVER_SETBOUNDS_GRACE_MS 内的 'moved' 当作"系统触发",其后才算用户拖。
   const recordUserBounds = (): void => {
-    if (!popoverWindow) return;
-    if (Date.now() - lastShowAt < 200) return; // 200ms 内是 setBounds 自己触发
+    if (!popoverWindow || popoverWindow.isDestroyed()) return;
+    if (Date.now() - popoverLastShowAt < POPOVER_SETBOUNDS_GRACE_MS) return;
     const b = popoverWindow.getBounds();
     userMovedBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
   };
   popoverWindow.on('moved', recordUserBounds);
   popoverWindow.on('resized', recordUserBounds);
-  // 暴露给 showPopoverFor 设置 lastShowAt
-  (popoverWindow as unknown as { _setLastShow: (t: number) => void })._setLastShow = (t) => {
-    lastShowAt = t;
-  };
 
   popoverWindow.on('hide', () => {
     if (popoverAutoHideTimer !== null) {
       clearTimeout(popoverAutoHideTimer);
       popoverAutoHideTimer = null;
     }
+    if (popoverBlurHideTimer !== null) {
+      clearTimeout(popoverBlurHideTimer);
+      popoverBlurHideTimer = null;
+    }
   });
 
-  // 拦截真正 close,改成 hide(整个 app 生命周期复用同一个窗口)
+  // 仅 macOS:popover blur 后延迟自动隐藏 —— spotlight 风格的失焦消失。
+  // Linux Wayland 下 blur 事件不可靠(有时窗口在前台也会 spurious blur),不启用以免误隐;
+  // Windows 暂时不启用,等真有用户反馈再考虑。规则 4(严禁 fallback):用 platform 显式分支,
+  // 不写"反正其他平台试试也行"。
+  if (process.platform === 'darwin') {
+    popoverWindow.on('blur', () => {
+      if (popoverBlurHideTimer !== null) clearTimeout(popoverBlurHideTimer);
+      popoverBlurHideTimer = setTimeout(() => {
+        // 触发时再校验一次窗口状态,防止 timer fire 时窗口已经被销毁
+        if (popoverWindow && !popoverWindow.isDestroyed() && popoverWindow.isVisible()) {
+          popoverWindow.hide();
+        }
+        popoverBlurHideTimer = null;
+      }, POPOVER_BLUR_HIDE_DELAY_MS);
+    });
+    popoverWindow.on('focus', () => {
+      // 用户切回 popover 取消延迟隐藏
+      if (popoverBlurHideTimer !== null) {
+        clearTimeout(popoverBlurHideTimer);
+        popoverBlurHideTimer = null;
+      }
+    });
+  }
+
+  // 拦截真正 close,改成 hide(整个 app 生命周期复用同一个窗口)。
+  // macOS 上 Cmd+W 的 close 路径已经被 before-input-event 拦截;这里兜底处理:
+  //   - 主进程发起的 close(window-all-closed 等)
+  //   - 渲染层 window.close() 调用
+  // isQuitting === true 时(app 即将退出)不拦截,让窗口正常销毁。
   popoverWindow.on('close', (e) => {
     if (!isQuitting) {
       e.preventDefault();
       popoverWindow?.hide();
     }
   });
+
+  // 渲染层崩溃恢复:JS 异常 / OOM / GPU 进程崩溃都会触发 'render-process-gone'。
+  // 重新 load 同一个 hash,popover 状态(位置 / 大小)仍然由主进程的 userMovedBounds 保留。
+  // 触发时机:用户在 popover 里点了某个按钮 → 渲染层 throw → 整个 popover 白屏 / 黑屏。
+  popoverWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[LangCat] popover 渲染进程崩溃,自动重载:', details.reason);
+    if (popoverWindow && !popoverWindow.isDestroyed()) {
+      // hide 一下,reload 期间窗口会闪一下,先隐藏更优雅;下次快捷键再 show
+      popoverWindow.hide();
+      loadView(popoverWindow, '/popover');
+    }
+  });
+
+  // 'closed' 事件:窗口真的被销毁(只有 isQuitting === true 时才会到这一步)。
+  // 把引用清掉,ensurePopoverAlive 下次会发现并重建(虽然 quit 时不会再 ensurePopoverAlive,
+  // 但保留这个 handler 是好习惯,防止野指针)。
+  popoverWindow.on('closed', () => {
+    popoverWindow = null;
+  });
+}
+
+/**
+ * 修 bug 的关键防御:每次要操作 popover 前,先确保它"活着"。
+ *
+ * 三种异常状态我们都要兜:
+ *   1) popoverWindow === null —— 进程刚启动还没 createPopoverWindow,或被 'closed' 清空
+ *   2) popoverWindow.isDestroyed() === true —— webContents 已销毁,后续任何 API 都会 throw
+ *   3) popoverWindow.webContents.isDestroyed() —— 罕见,但 macOS 上 Cmd+W 历史 bug 出现过
+ *
+ * 任何一种 → 重新 createPopoverWindow,引用替换。这是修 macOS"hotkey 关闭后不再弹"
+ * 这个 bug 的核心:之前的代码只检查 `if (!popoverWindow) return`,destroyed 状态下
+ * 引用还在,setBounds 会 throw 然后被外层吞掉(因为是事件回调里直接 await 的),
+ * 用户看到的就是"按快捷键没反应"。
+ */
+function ensurePopoverAlive(): void {
+  const dead =
+    popoverWindow === null ||
+    popoverWindow.isDestroyed() ||
+    popoverWindow.webContents.isDestroyed();
+  if (dead) {
+    console.warn('[LangCat] popover 不可用,重建中…');
+    createPopoverWindow();
+  }
 }
 
 /* ──────────────────────────────────────────────────────────── */
@@ -267,18 +398,38 @@ function computePopoverBoundsBottomCenter(): {
 }
 
 function showPopoverFor(word: string): void {
-  if (!popoverWindow) return;
+  // 防御:hotkey 触发时窗口可能已被销毁(macOS 上 Cmd+W / 渲染崩溃 / 系统回收)
+  // 必须在用 popoverWindow 之前重建,这是修"关闭后 hotkey 不再弹"bug 的核心
+  ensurePopoverAlive();
+  if (!popoverWindow || popoverWindow.isDestroyed()) {
+    // 经过 ensurePopoverAlive 还是 null —— createPopoverWindow 失败了,fail-loud
+    console.error('[LangCat] showPopoverFor: popover 重建失败');
+    return;
+  }
 
   // 优先用用户上次拖动到的位置 + 拉伸到的大小(记忆体验);没有就默认屏幕中下方 + 默认尺寸
   const place =
     userMovedBounds !== null
       ? { ...userMovedBounds }
       : computePopoverBoundsBottomCenter();
-  // 标记本次 setBounds 的时间,'moved' 事件 200ms 内的回调当作系统触发
-  (popoverWindow as unknown as { _setLastShow?: (t: number) => void })._setLastShow?.(Date.now());
+
+  // 标记本次 setBounds 的时间,'moved' 事件 grace 期内的回调当作系统触发
+  popoverLastShowAt = Date.now();
   popoverWindow.setBounds(place);
+
+  // macOS 边界:hide 后 setVisibleOnAllWorkspaces / alwaysOnTop 状态会被系统重置。
+  // 二次 show 前必须显式重设,否则 popover 不会浮在全屏应用之上、可能被 dock 应用遮挡。
+  // Linux / Windows 上无此问题,但重设无副作用,统一执行简化代码。
+  popoverWindow.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: true,
+  });
+  popoverWindow.setAlwaysOnTop(true, 'floating');
+
   popoverWindow.webContents.send('langcat:show-word', word);
-  // showInactive:popover 出现不偷焦点,用户原应用工作不被打断
+
+  // showInactive:popover 出现不偷焦点,用户原应用工作不被打断。
+  // macOS 上 showInactive 在 hide → show 循环里偶有失效报告(electron #11782 系列),
+  // 但目前实测 33.x 上修好了;若用户再报"窗口在但在底层",改成 show() + 立即 blur 模拟。
   popoverWindow.showInactive();
 
   // DEBUG 阶段:不启动自动 hide timer。靠 ✕ / ESC 主动关闭。
@@ -339,11 +490,11 @@ function simulateCopy(): Promise<void> {
       // 模拟失败(命令不存在 / 权限不够)不阻塞,fallback 到现有剪贴板
       proc.on('error', () => resolve());
       proc.on('exit', () => resolve());
-      // 兜底超时 200ms — Accessibility 没授权时 osascript 卡住
+      // 兜底超时 — Accessibility 没授权时 osascript 卡住,不能阻塞快捷键
       setTimeout(() => {
         try { proc.kill(); } catch {}
         resolve();
-      }, 200);
+      }, SIMULATE_COPY_TIMEOUT_MS);
     } catch {
       resolve();
     }
@@ -351,9 +502,9 @@ function simulateCopy(): Promise<void> {
 }
 
 async function tryHandleHotkey(): Promise<void> {
-  // 模拟系统 copy,等剪贴板传播 ~50ms 再读
+  // 模拟系统 copy,等剪贴板传播再读
   await simulateCopy();
-  await new Promise((r) => setTimeout(r, 50));
+  await new Promise((r) => setTimeout(r, CLIPBOARD_PROPAGATE_MS));
 
   const clip = clipboard.readText();
   const word = isValidEnglishWord(clip);
@@ -558,6 +709,63 @@ async function langcatFetch(
 }
 
 /* ──────────────────────────────────────────────────────────── */
+/*  macOS 专属:Accessibility 权限引导                           */
+/* ──────────────────────────────────────────────────────────── */
+
+/**
+ * 检测 + 引导 macOS Accessibility 权限。
+ *
+ * 为啥要这个权限:hotkey 触发时主进程会 osascript 模拟 Cmd+C(把用户当前选中的文字
+ * 写进剪贴板,然后查词)—— 这是"系统级模拟按键",macOS 必须通过 System Settings →
+ * Privacy & Security → Accessibility 显式授权 LangCat 才能用,否则 osascript 会
+ * 卡住等用户响应系统弹窗(我们已经设了 SIMULATE_COPY_TIMEOUT_MS 兜底,但用户体验是
+ * "按快捷键没反应")。
+ *
+ * 用 systemPreferences.isTrustedAccessibilityClient(false):
+ *   - 参数 false = "只查询,别弹系统弹窗"
+ *   - 参数 true 会弹系统的"要给 LangCat 权限吗"对话框,但那个对话框很丑、文字简短,
+ *     用户经常直接关掉。我们用 false 查询 + 自己的友好对话框引导,体验更好。
+ *
+ * 仅 macOS 调用;Linux 用 xdotool 不需要 Accessibility 权限,Windows 暂未模拟。
+ * 规则 4:不写"反正其他平台调用也没事"的兜底,显式 platform 分支。
+ */
+function checkMacAccessibilityPermission(): void {
+  if (process.platform !== 'darwin') return;
+  // false = 不弹系统弹窗,只查询当前授权状态
+  const trusted = systemPreferences.isTrustedAccessibilityClient(false);
+  if (trusted) {
+    console.info('[LangCat] macOS Accessibility 已授权');
+    return;
+  }
+  console.warn('[LangCat] macOS Accessibility 未授权,引导用户去系统设置开启');
+
+  // 异步弹引导对话框,不阻塞 app.whenReady。
+  // 用户即使不授权也能用 LangCat —— 只是必须先 Cmd+C 复制再按快捷键(纯剪贴板模式)。
+  void dialog
+    .showMessageBox({
+      type: 'info',
+      title: 'LangCat 需要辅助功能权限',
+      message: '允许 LangCat 读取你当前选中的英文词',
+      detail:
+        '为了让快捷键(⌘+Shift+/)能直接读取你在任何应用里选中的文字,' +
+        'LangCat 需要"辅助功能(Accessibility)"权限。\n\n' +
+        '不开权限也能用,但你需要先按 ⌘+C 把词复制到剪贴板,再按快捷键查词。\n\n' +
+        '点"打开系统设置"会跳到 系统设置 → 隐私与安全性 → 辅助功能,' +
+        '在列表里找到 LangCat 并打开开关即可。',
+      buttons: ['打开系统设置', '先跳过'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    })
+    .then(({ response }) => {
+      if (response === 0) {
+        void shell.openExternal(MAC_ACCESSIBILITY_PREF_URL);
+      }
+    })
+    .catch((err) => console.warn('[LangCat] Accessibility 引导对话框失败:', err));
+}
+
+/* ──────────────────────────────────────────────────────────── */
 /*  生命周期                                                     */
 /* ──────────────────────────────────────────────────────────── */
 
@@ -567,8 +775,22 @@ app.whenReady().then(() => {
   // 仅含 "LangCat / Quit" 的最小菜单 —— 符合 mac 用户预期。
   Menu.setApplicationMenu(null);
 
+  // macOS Dock 行为:
+  //   - 默认 'regular' 策略 = LangCat 在 Dock 显示图标、可被 ⌘+Tab 切换 —— 这正是我们要的。
+  //   - 不调 app.dock.hide() —— hide 会让 LangCat 变成"无图标后台进程",
+  //     用户主窗口最小化 / 关闭后无法通过 Dock click 重新激活,体验差。
+  //   - popover 用 showInactive() 不偷焦点,popover 显示时 LangCat 不会在 Dock 跳跃。
+  //   - 显式 setActivationPolicy('regular') 强保险,防止 electron-builder 配置漂移。
+  if (process.platform === 'darwin') {
+    app.setActivationPolicy('regular');
+  }
+
   createMainWindow();
   createPopoverWindow();
+
+  // macOS:启动时检测辅助功能授权,未授权弹引导对话框。
+  // 在 createMainWindow 之后调,这样对话框有 parent 概念(即使不传 parent 也是 modal)。
+  checkMacAccessibilityPermission();
 
   // 全局快捷键 — 触发查词 popover
   const ok = globalShortcut.register(SHORTCUT_LOOKUP, tryHandleHotkey);
@@ -585,8 +807,13 @@ app.whenReady().then(() => {
     globalShortcut.unregisterAll();
   });
 
-  // popover 主动关闭(ESC 键 / ✕ 按钮)
-  ipcMain.on('langcat:close-popover', () => popoverWindow?.hide());
+  // popover 主动关闭(ESC 键 / ✕ 按钮 / Cmd+W 由 before-input-event 拦截)
+  // 统一走 hide,绝不 destroy;destroyed 状态由 ensurePopoverAlive 在下次 show 时兜
+  ipcMain.on('langcat:close-popover', () => {
+    if (popoverWindow && !popoverWindow.isDestroyed()) {
+      popoverWindow.hide();
+    }
+  });
 
   // LangCat 词素学习库查询 —— main 进程 fetch 中转,绕开 renderer 的 CORS
   // 协议:renderer 通过 ipcRenderer.invoke('langcat:lookup-langcat', word)
@@ -801,8 +1028,16 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
+  // macOS:用户点 Dock 图标 / 用 ⌘+Tab 切回 LangCat 时触发。
+  // 用户预期是看到主窗口;如果主窗口被关掉了就重建,popover 也保险重建一次。
   if (BrowserWindow.getAllWindows().length === 0) {
     createMainWindow();
     createPopoverWindow();
+    return;
+  }
+  // 主窗口还在但被最小化 → 还原并 focus
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
   }
 });

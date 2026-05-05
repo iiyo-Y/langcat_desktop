@@ -22,6 +22,7 @@ files:
   - package.json
 
 mac:
+  # App Store 分类(已有,保留):教育类
   category: public.app-category.education
   # 用 .icns(release.yml 跑 png2icons 从 icon.png 生成)— PNG 路径 macOS Dock
   # 不显示 logo,必须 .icns
@@ -29,6 +30,55 @@ mac:
   target:
     - target: dmg
       arch: [arm64, x64]
+  # ─────────────────────────────────────────────────────────────
+  # 不签名场景下的 macOS 关键开关(我们没付 $99 Apple Developer Program)
+  # ─────────────────────────────────────────────────────────────
+  # hardened runtime:Apple 强化运行时,要求所有 dylib 必须签名 + notarized。
+  # 没签名硬开会让 macOS 13+ 直接拒绝启动(报 "代码签名无效")。
+  # 真正签名时再翻成 true。
+  hardenedRuntime: false
+  # 跳过 electron-builder 内部对 dmg 做 spctl Gatekeeper 评估
+  # —— 在没签名的 macOS runner 上 build 会因 spctl 校验失败而中断。
+  gatekeeperAssess: false
+  # entitlements:即使不签名,Info.plist 的 Usage Description + entitlements
+  # 仍是 osascript / Accessibility 等系统对话框的合法依据。
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # 保留 macOS 原生 dark mode 适配能力(产品本身是品牌色,但系统级 chrome
+  # 例如菜单栏/对话框仍跟随系统主题)
+  darkModeSupport: true
+  # ─────────────────────────────────────────────────────────────
+  # 自定义 Info.plist 字段(extendInfo 会 merge 到产物的 Info.plist)
+  # ─────────────────────────────────────────────────────────────
+  extendInfo:
+    # 显式声明这是一个普通 Dock app(不是 menu bar agent)
+    # 改成 true 会让窗口/Dock 图标消失,变成 status bar app —— 我们不要
+    LSUIElement: false
+    # ⚠️ 关键:osascript 模拟 Cmd+C 必须有这条 Usage Description,
+    # 否则 macOS 拒绝弹"允许控制其他应用"对话框,功能直接不可用。
+    NSAppleEventsUsageDescription: "LangCat 需要在你按下查词快捷键时,模拟一次 Cmd+C 复制你选中的单词。授权后才能让“选中即查”流畅工作。"
+    # 显式声明本 app 会跑 AppleScript / Apple Events
+    NSAppleScriptEnabled: true
+
+# ─────────────────────────────────────────────────────────────
+# DMG 视觉:用户双击 .dmg 后看到的安装窗口
+# 标准 macOS 风格 —— 左边 app 图标,右边 Applications 文件夹快捷方式,
+# 用户拖动安装。
+# ─────────────────────────────────────────────────────────────
+dmg:
+  title: "LangCat ${version}"
+  iconSize: 128
+  contents:
+    - x: 130
+      y: 220
+      type: file
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+  window:
+    width: 540
+    height: 380
 
 win:
   # 同理 NSIS installer 要 .ico

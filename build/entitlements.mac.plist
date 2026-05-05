@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS 沙盒能力声明(entitlements)
+
+  即使我们目前没付 $99 Apple Developer Program、不做代码签名 + 公证,
+  这个文件仍然是必要的:
+    - electron-builder 会把它作为 codesign 的 entitlements 输入(future-proof,
+      签名生效后无需改 yml 配置)
+    - 跟 electron-builder.yml 里的 extendInfo Usage Description 配合,
+      确保 osascript 模拟 Cmd+C / 网络出站 / 用户文件读写 等系统能力
+      在系统弹窗时被正确归类。
+
+  每个 key 都对应一项 macOS 安全策略 —— 加 entitlement 不等于自动获得权限,
+  系统首次触发时仍会弹原生对话框让用户选「允许」。
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 允许向其他 app 发送 Apple Events:osascript 模拟 Cmd+C 必需 -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+
+    <!-- V8 / JIT 需要可写可执行内存(Electron / Chromium 默认要求) -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- 允许动态加载未签名的原生模块(node_modules 里某些 .node 不签) -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- 网络出站:调用 api-go / Supabase / 字典 API -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- 用户主动选中的文件读写:导出 / 导入单词本 JSON -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>
