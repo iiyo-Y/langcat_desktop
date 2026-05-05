@@ -85,14 +85,17 @@ win:
   icon: build/icon.ico
   target:
     - target: nsis
-      arch: [x64]
+      # x64 主流;arm64 给 Surface Pro X / 高通 Snapdragon X / Copilot+ PC;
+      # ia32 故意不加 —— Win 32-bit 用户已极少,产物多 50% 体积不值
+      arch: [x64, arm64]
 
 linux:
   icon: build/icon.png
   category: Education
   target:
     - target: AppImage
-      arch: [x64]
+      # x64 桌面主流;arm64 给 ARM 服务器 / Raspberry Pi 5 / Apple Silicon Linux 虚拟机
+      arch: [x64, arm64]
 
 # 发布配置 —— 自动更新数据源
 #
