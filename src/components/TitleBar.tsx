@@ -31,7 +31,7 @@ export function TitleBar(): JSX.Element {
     >
       {/* 品牌区 —— 可拖 */}
       <div className="flex items-center gap-2 flex-1 min-w-0 pl-3">
-        <img src="/brand/logo.png" alt="" className="h-5 w-5 shrink-0" />
+        <img src="./brand/logo.png" alt="" className="h-5 w-5 shrink-0" />
         <span className="text-langcat-white text-xs font-extrabold tracking-[0.15em]">
           LANGCAT
         </span>

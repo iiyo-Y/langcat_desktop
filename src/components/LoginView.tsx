@@ -85,7 +85,7 @@ export function LoginView({ onClose }: Props): JSX.Element {
         {/* 标题 */}
         <header className="px-5 pt-5 pb-3 flex items-center gap-3">
           <span className="border-langcat border-langcat-outline bg-langcat-pale-blue/40 inline-flex h-9 w-9 items-center justify-center rounded-langcat-small shrink-0">
-            <img src="/brand/logo.png" alt="" className="h-7 w-7" />
+            <img src="./brand/logo.png" alt="" className="h-7 w-7" />
           </span>
           <div className="flex-1">
             <div className="text-langcat-outline text-lg font-extrabold tracking-tight">

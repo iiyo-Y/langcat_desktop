@@ -69,7 +69,7 @@ export function Sidebar({
       {/* 顶部 logo */}
       <div className="px-5 py-5 flex items-center gap-3 shrink-0">
         <span className="border-langcat border-langcat-outline bg-langcat-white inline-flex h-9 w-9 items-center justify-center rounded-langcat-small shrink-0">
-          <img src="/brand/logo.png" alt="" className="h-7 w-7" />
+          <img src="./brand/logo.png" alt="" className="h-7 w-7" />
         </span>
         <div className="text-langcat-white text-[15px] font-extrabold tracking-[0.1em]">
           LANGCAT
