@@ -25,18 +25,38 @@ permissions:
 
 jobs:
   build:
-    name: build (${{ matrix.os }})
+    name: build (${{ matrix.os }} → ${{ matrix.platform }} ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Linux x64 + arm64(同一 ubuntu runner cross-build,native module 不参与 keystroke 路径,nut-js prebuild 全平台都有)
           - os: ubuntu-latest
             platform: linux
-          - os: macos-latest
-            platform: mac
+            arch: x64
+          - os: ubuntu-latest
+            platform: linux
+            arch: arm64
+          # Windows x64 + arm64(同一 windows-latest runner cross-build)
           - os: windows-latest
             platform: win
+            arch: x64
+          - os: windows-latest
+            platform: win
+            arch: arm64
+          # ⚠️ macOS 拆两个 native runner,绕开 nut-js cross-arch prebuilt 缺失:
+          #   - macos-13 = Intel x64 native
+          #   - macos-14 = Apple Silicon arm64 native
+          # 之前 macos-latest 单 runner 跑 [arm64,x64] cross-build,host 一个 arch
+          # 时 nut-js 只装当前 arch prebuilt,build 另一 arch 时 .node 缺失静默失败,
+          # 产物只有一个 arch 上传,另一 arch 在 release 页消失。
+          - os: macos-13
+            platform: mac
+            arch: x64
+          - os: macos-14
+            platform: mac
+            arch: arm64
 
     steps:
       - name: Checkout
@@ -62,6 +82,9 @@ jobs:
       # electron-builder 默认会从 PNG 自动转,但实测某些尺寸 / alpha 处理有问题。
       # png2icons 是纯 JS 跨平台库,不引入原生编译依赖,一行命令搞定。
       - name: Generate native icons (.icns / .ico)
+        # 强制 bash —— Windows runner 默认 PowerShell,npx --yes 路径解析 / 多行
+        # `|` heredoc 在 PowerShell 下行为不一致,bash(Git Bash)三平台一致
+        shell: bash
         run: |
           npx --yes png2icons build/icon.png build/icon -allp
           ls -la build/
@@ -105,4 +128,7 @@ jobs:
           # Windows 签名(将来准备好 .pfx 证书后填)
           # WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           # WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-        run: pnpm exec electron-builder --${{ matrix.platform }} --publish always --config electron-builder.yml
+        # --${{ matrix.platform }} 平台 + --${{ matrix.arch }} 显式 arch
+        # 让 electron-builder 单 arch 构建(不再 [arm64,x64] cross),配合 matrix
+        # 拆 macos-13 / macos-14 两个 native runner,nut-js 只用 host 自身 prebuilt
+        run: pnpm exec electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish always --config electron-builder.yml
