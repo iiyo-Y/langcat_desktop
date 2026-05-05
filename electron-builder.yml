@@ -21,6 +21,13 @@ files:
   - dist-electron
   - package.json
 
+# Native modules 必须从 asar 解出来才能 dlopen(asar 内 .node 不能加载)。
+# nut-js 内核 libnut 是 native binding,跨平台 prebuild 在 node_modules 里,
+# 这里把整个 nut-js 包族都 unpack 出来给 dlopen。
+asarUnpack:
+  - "**/*.node"
+  - "node_modules/@nut-tree-fork/**"
+
 mac:
   # App Store 分类(已有,保留):教育类
   category: public.app-category.education

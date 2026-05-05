@@ -32,7 +32,10 @@ import {
 } from 'electron';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { keyboard, Key } from '@nut-tree-fork/nut-js';
+
+// nut-js 默认 100ms autoDelay 让组合键有空隙;我们快捷键路径要快,5ms 够稳
+keyboard.config.autoDelayMs = 5;
 import { setupAutoUpdater } from './updater';
 import * as vocabulary from './vocabulary';
 import * as auth from './auth';
@@ -488,83 +491,69 @@ function isValidEnglishWord(text: string): string | null {
  * 想看看 popover 又关掉了想再看一眼),不再依赖 lastQueriedWord 比对。
  */
 /**
- * 模拟系统 copy(只在 Linux 真生效;macOS / Windows 跳过)。
+ * 模拟系统 copy —— 选中即查的核心。
  *
- * macOS 设计上不可行的诊断:
- *   - osascript 是 LangCat 通过 spawn 启动的子进程
- *   - macOS TCC(权限子系统)按 binary path 跟踪权限,osascript 是
- *     /usr/bin/osascript 这个独立 binary,**不继承父进程 LangCat 的辅助功能权限**
- *   - 用户即使在系统设置里把 LangCat 加进辅助功能,osascript 仍报
- *     "不允許以 osascript 傳送按鍵 (1002)"
- *   - 想绕开:要么把 /usr/bin/osascript 也加进辅助功能(脏 + 用户不该做),
- *     要么改用 native helper(CGEventPost 直接走系统级事件,权限挂在 LangCat),
- *     需要 Apple Developer ID 签名 + Swift/ObjC 编译,留给付费阶段
+ * 全平台用 nut-js native module(libnut → CGEventPost on macOS / SendInput on
+ * Windows / X11 XTest on Linux)。**关键**:nut-js 是 LangCat 主进程内调用的
+ * native function,不像 spawn(osascript) 是 child process,所以 macOS TCC
+ * 权限挂在 LangCat.app 自己 binary 上 —— 用户授权 LangCat 辅助功能后即生效,
+ * 不需要单独授权 osascript。
  *
- * MVP 阶段 macOS 工作流改成:
- *   ① 选中词 → ② ⌘C 复制 → ③ ⌘+Shift+/ 弹释义
- *   读纯剪贴板,2 步用户掌控,稳。
- *
- * Linux 仍用 xdotool(没有 TCC 限制,X11 上工作良好):
- *   选中词 → Ctrl+Shift+/ = 直接弹(单步)
+ * 早版本用过的 spawn osascript / xdotool 路径已撤回 —— osascript 子进程不能
+ * 继承父 app 权限,产品体验崩坏。
  */
-function simulateCopy(): Promise<void> {
-  return new Promise((resolve) => {
-    if (process.platform !== 'linux') {
-      // macOS: TCC 拦死(见上方注释)→ 完全跳过,直接走剪贴板模式
-      // Windows: 暂未实现 PowerShell SendKeys → 同样剪贴板模式
-      resolve();
-      return;
+async function simulateCopy(): Promise<void> {
+  try {
+    if (process.platform === 'darwin') {
+      await keyboard.type(Key.LeftCmd, Key.C);
+    } else {
+      // Linux + Windows: Ctrl+C
+      await keyboard.type(Key.LeftControl, Key.C);
     }
-    try {
-      const proc = spawn('xdotool', ['key', '--clearmodifiers', 'ctrl+c'], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let settled = false;
-      const finish = (): void => {
-        if (settled) return;
-        settled = true;
-        resolve();
-      };
-      proc.on('error', () => finish());
-      proc.on('exit', () => finish());
-      setTimeout(() => {
-        if (settled) return;
-        try { proc.kill(); } catch {}
-        finish();
-      }, SIMULATE_COPY_TIMEOUT_MS);
-    } catch {
-      resolve();
-    }
-  });
+  } catch (e: unknown) {
+    // 失败不阻塞 — 仍然 fallback 读现有剪贴板。常见失败:macOS 辅助功能
+    // 权限没授权;tryHandleHotkey 会在没读到合法词时弹引导对话框
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn('[simulateCopy] nut-js failed:', msg);
+  }
 }
 
-/** macOS 工作流提示对话框只在每个进程生命周期内弹一次,避免每次没读到词都打扰 */
-let macWorkflowHelpShown = false;
+/** Accessibility 引导对话框只在每个进程生命周期内弹一次,避免打扰 */
+let accessibilityHelpShown = false;
 
 /**
- * macOS:第一次按快捷键但剪贴板里不是英文词时,弹友好对话框教用户工作流。
+ * macOS:nut-js 模拟 Cmd+C 没读到合法词时,可能是辅助功能没授权。
  *
- * 不再尝试自动模拟 Cmd+C(macOS TCC 设计上不让 child process 继承父进程辅助
- * 功能权限,即使用户授权了 LangCat,osascript 子进程仍报 not-allowed)。
- * 改成显式工作流引导:① 选 ② ⌘C ③ 快捷键。
+ * nut-js 内部用 CGEventPost,权限挂在 LangCat.app 自己。用户没授权时,
+ * keystroke 会被 macOS 系统级拦截(不一定 throw,可能 silent 不发送),
+ * 表现是剪贴板没变,我们读到旧内容 / 空。
+ *
+ * 弹一次性引导 + 一键直跳系统设置面板。授权后 nut-js 立即 work,无需重启。
  */
-function maybeShowMacWorkflowHelp(): void {
+function maybeShowAccessibilityHelp(): void {
   if (process.platform !== 'darwin') return;
-  if (macWorkflowHelpShown) return;
-  macWorkflowHelpShown = true;
+  if (accessibilityHelpShown) return;
+  // false = 只查询,不弹系统对话框(后者在 SIP 严格的版本上会卡)
+  const trusted = systemPreferences.isTrustedAccessibilityClient(false);
+  if (trusted) return; // 已授权就不打扰(可能用户只是没选中文字)
+  accessibilityHelpShown = true;
   void dialog
     .showMessageBox({
-      type: 'info',
-      buttons: ['知道了'],
+      type: 'warning',
+      buttons: ['打开系统设置', '稍后'],
       defaultId: 0,
-      title: 'LangCat 查词工作流',
-      message: 'macOS 上选中即查需要先复制',
+      cancelId: 1,
+      title: 'LangCat 需要辅助功能权限',
+      message: '快捷键没读到你选中的单词',
       detail:
-        '受 macOS 安全模型限制,LangCat 不能直接读你选中的内容。请用 3 步工作流:\n\n' +
-        '① 选中要查的英文词\n' +
-        '② 按 ⌘+C 复制到剪贴板\n' +
-        '③ 按 ⌘+Shift+/ 弹释义\n\n' +
-        '熟练后两步可以连按,跟 Spotlight 一样快。',
+        '"选中即查"需要"辅助功能 (Accessibility)"权限才能模拟 ⌘+C 读取选中内容。\n\n' +
+        '请打开:系统设置 → 隐私与安全 → 辅助功能 → 把 LangCat 打开。\n\n' +
+        '授权后无需重启 LangCat,直接再按一次快捷键即可。',
+    })
+    .then(({ response }) => {
+      if (response === 0) {
+        void shell.openExternal(MAC_ACCESSIBILITY_PREF_URL);
+      }
     });
 }
 
@@ -579,10 +568,10 @@ async function tryHandleHotkey(): Promise<void> {
     showPopoverFor(word);
     return;
   }
-  // 没读到合法英文词:
-  //   - macOS 上第一次发生时,弹工作流引导(只弹一次)
-  //   - 然后用 lastQueriedWord "再看一眼" 上次查的,避免误触发完全没反馈
-  maybeShowMacWorkflowHelp();
+  // 没读到合法英文词。可能:
+  //   - macOS 辅助功能没授权 → 弹一次性引导(只在没授权时,不打扰已授权用户)
+  //   - 用户没选中文字 / 选中的不是英文 → 用 lastQueriedWord "再看一眼"
+  maybeShowAccessibilityHelp();
   if (lastQueriedWord !== null) {
     showPopoverFor(lastQueriedWord);
   }
