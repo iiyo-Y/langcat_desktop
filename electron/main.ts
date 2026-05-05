@@ -95,10 +95,10 @@ const POPOVER_SETBOUNDS_GRACE_MS = 200;
  * macOS 上若 Accessibility 没授权,osascript 会卡住等用户响应系统弹窗 —— 我们不能阻塞快捷键。
  * Linux 下 xdotool 失败也走这个超时。
  */
-const SIMULATE_COPY_TIMEOUT_MS = 200;
+const SIMULATE_COPY_TIMEOUT_MS = 600;
 
 /** 模拟 Cmd+C 后等剪贴板传播的延时(ms);太短会读到旧内容 */
-const CLIPBOARD_PROPAGATE_MS = 50;
+const CLIPBOARD_PROPAGATE_MS = 120;
 
 /** macOS Accessibility 设置面板的系统 URL */
 const MAC_ACCESSIBILITY_PREF_URL =
@@ -199,6 +199,23 @@ function createMainWindow(): void {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: 'deny' };
+  });
+
+  // macOS 标准行为:红色按钮 / Cmd+W 关 mainWindow 是 hide,不是真销毁。
+  // 不这么做的后果:popoverWindow 是 skipTaskbar=true,主窗一关 macOS 把整个
+  // app 从 Dock 撤掉,看起来 LangCat 退出了 —— 但实际上 popoverWindow 还活着,
+  // 用户再按快捷键也呼不出 Dock icon,体验上等同 app 死了。
+  // 拦截 close 改 hide 后:Dock 图标保留,用户 click Dock 走 'activate' 事件
+  // 重新 show 主窗。只在 Cmd+Q (before-quit 触发 isQuitting=true) 才真退。
+  // Linux / Windows 不需要这个行为(关主窗 = 退出 app 是用户预期),
+  // 所以只拦 darwin。
+  mainWindow.on('close', (e) => {
+    if (process.platform === 'darwin' && !isQuitting) {
+      e.preventDefault();
+      mainWindow?.hide();
+      // app.dock 在 hide mainWindow 后仍保留 LangCat 图标(因为 popoverWindow
+      // 还在,且 setActivationPolicy('regular') 已显式声明 LangCat 是 Dock app)
+    }
   });
 
   mainWindow.on('closed', () => {
@@ -470,6 +487,11 @@ function isValidEnglishWord(text: string): string | null {
  * 同一词多次按快捷键不再误判:上一个词跟新剪贴板内容相同时正常重弹(用户可能
  * 想看看 popover 又关掉了想再看一眼),不再依赖 lastQueriedWord 比对。
  */
+/** 记录最近一次 simulateCopy 的失败原因(null = 成功)。tryHandleHotkey 用它判断要不要引导授权 */
+let lastSimulateError: string | null = null;
+/** Accessibility 提示对话框只弹一次,避免烦人 */
+let accessibilityHelpShown = false;
+
 function simulateCopy(): Promise<void> {
   return new Promise((resolve) => {
     let cmd: string;
@@ -482,23 +504,86 @@ function simulateCopy(): Promise<void> {
       args = ['key', '--clearmodifiers', 'ctrl+c'];
     } else {
       // Windows 暂不模拟,直接 resolve
+      lastSimulateError = null;
       resolve();
       return;
     }
     try {
-      const proc = spawn(cmd, args, { stdio: 'ignore' });
-      // 模拟失败(命令不存在 / 权限不够)不阻塞,fallback 到现有剪贴板
-      proc.on('error', () => resolve());
-      proc.on('exit', () => resolve());
-      // 兜底超时 — Accessibility 没授权时 osascript 卡住,不能阻塞快捷键
-      setTimeout(() => {
-        try { proc.kill(); } catch {}
+      // 捕获 stderr — osascript 在 Accessibility 没授权时会写错误消息到 stderr
+      // (例如 "System Events got an error: osascript is not allowed to send keystrokes"),
+      // 之前 stdio:'ignore' 把这条关键诊断丢了,导致 silent fail
+      const proc = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderrBuf = '';
+      proc.stderr?.on('data', (chunk: Buffer) => {
+        stderrBuf += chunk.toString('utf8');
+      });
+      let settled = false;
+      const finish = (err: string | null): void => {
+        if (settled) return;
+        settled = true;
+        lastSimulateError = err;
+        if (err) console.warn('[simulateCopy] failed:', err);
         resolve();
+      };
+      proc.on('error', (e) => finish(`spawn ${cmd} 失败: ${e.message}`));
+      proc.on('exit', (code) => {
+        if (code === 0 && !stderrBuf) {
+          finish(null);
+        } else {
+          finish(
+            `${cmd} exit=${code}` +
+              (stderrBuf ? ` stderr=${stderrBuf.trim().slice(0, 300)}` : ''),
+          );
+        }
+      });
+      // 兜底超时 — Accessibility 没授权时 osascript 可能卡住等系统对话框
+      setTimeout(() => {
+        if (settled) return;
+        try { proc.kill(); } catch {}
+        finish(`${cmd} timeout (${SIMULATE_COPY_TIMEOUT_MS}ms)`);
       }, SIMULATE_COPY_TIMEOUT_MS);
-    } catch {
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      lastSimulateError = `spawn throw: ${msg}`;
+      console.warn('[simulateCopy] throw:', msg);
       resolve();
     }
   });
+}
+
+/**
+ * macOS Accessibility 没授权时,显示一次性引导对话框 + 直跳系统设置面板。
+ *
+ * 触发条件:hotkey 触发时 simulateCopy 失败 + isTrustedAccessibilityClient 返 false。
+ * 只弹一次(accessibilityHelpShown flag),避免每次按快捷键都打扰。
+ *
+ * 用户授权后**不需要重启 LangCat** —— macOS 实时生效,下次按快捷键就 work。
+ */
+function maybeShowAccessibilityHelp(): void {
+  if (process.platform !== 'darwin') return;
+  if (accessibilityHelpShown) return;
+  // false = 只查询,不弹系统对话框(后者在 SIP 严格的版本上会卡住)
+  const trusted = systemPreferences.isTrustedAccessibilityClient(false);
+  if (trusted) return; // 已授权,不打扰
+  accessibilityHelpShown = true;
+  void dialog
+    .showMessageBox({
+      type: 'warning',
+      buttons: ['打开系统设置', '稍后'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'LangCat 需要辅助功能权限',
+      message: '快捷键没读到你选中的单词',
+      detail:
+        '查词快捷键需要"辅助功能 (Accessibility)"权限才能模拟 ⌘+C 读取你选中的内容。\n\n' +
+        '请打开:系统设置 → 隐私与安全 → 辅助功能 → 把 LangCat 打开。\n\n' +
+        '授权后无需重启 LangCat,直接再按一次快捷键即可。',
+    })
+    .then(({ response }) => {
+      if (response === 0) {
+        void shell.openExternal(MAC_ACCESSIBILITY_PREF_URL);
+      }
+    });
 }
 
 async function tryHandleHotkey(): Promise<void> {
@@ -512,8 +597,16 @@ async function tryHandleHotkey(): Promise<void> {
     showPopoverFor(word);
     return;
   }
-  // 剪贴板里不是英文词(可能用户没选中文字 / 选了中文 / 选了一句话):
-  // 重弹上次查询,让用户"再看一眼"
+  // 没读到合法英文词。三种可能:
+  //   1. macOS Accessibility 没授权 — simulateCopy 失败(lastSimulateError 非空)
+  //      → 弹 maybeShowAccessibilityHelp 引导授权
+  //   2. 用户没选词 / 选了非英文 / 选了多个词
+  //      → 用 lastQueriedWord "再看一眼" 上次查的(用户体验:误触发不至于啥都没)
+  //   3. 两者都中
+  //      → 先弹引导,再 fallback 到 lastQueriedWord
+  if (lastSimulateError !== null) {
+    maybeShowAccessibilityHelp();
+  }
   if (lastQueriedWord !== null) {
     showPopoverFor(lastQueriedWord);
   }
@@ -1035,9 +1128,10 @@ app.on('activate', () => {
     createPopoverWindow();
     return;
   }
-  // 主窗口还在但被最小化 → 还原并 focus
+  // 主窗口还在但被最小化 / 红点 hide → 还原并 focus
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
     mainWindow.focus();
   }
 });
