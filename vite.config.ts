@@ -50,6 +50,25 @@ export default defineConfig(({ mode }) => {
             'process.env.LANGCAT_SUPABASE_URL': JSON.stringify(supabaseURL),
             'process.env.LANGCAT_SUPABASE_ANON_KEY': JSON.stringify(supabaseAnon),
           },
+          build: {
+            rollupOptions: {
+              // 把 native module + electron-updater 标 external,不让 vite bundle 它们。
+              // 原因:nut-js 内部 native loader 用 __dirname 寻 *.node 文件,被
+              // bundle 进 main.js (ESM) 后 __dirname 不在 ESM scope,运行时 throw
+              // ReferenceError 把整个 app 启动崩。external 后运行时 Node 用 CJS
+              // require 加载这些包,__dirname 走标准 CJS 模块路径,正常。
+              // asar 模式下 electron-builder.yml 的 asarUnpack 已经把这些包解到
+              // resources/app.asar.unpacked/node_modules/,运行时 require 解析得到。
+              external: [
+                '@nut-tree-fork/nut-js',
+                '@nut-tree-fork/libnut',
+                '@nut-tree-fork/libnut-darwin',
+                '@nut-tree-fork/libnut-win32',
+                '@nut-tree-fork/libnut-linux',
+                'electron-updater',
+              ],
+            },
+          },
         },
       },
       preload: {
