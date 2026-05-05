@@ -487,107 +487,89 @@ function isValidEnglishWord(text: string): string | null {
  * 同一词多次按快捷键不再误判:上一个词跟新剪贴板内容相同时正常重弹(用户可能
  * 想看看 popover 又关掉了想再看一眼),不再依赖 lastQueriedWord 比对。
  */
-/** 记录最近一次 simulateCopy 的失败原因(null = 成功)。tryHandleHotkey 用它判断要不要引导授权 */
-let lastSimulateError: string | null = null;
-/** Accessibility 提示对话框只弹一次,避免烦人 */
-let accessibilityHelpShown = false;
-
+/**
+ * 模拟系统 copy(只在 Linux 真生效;macOS / Windows 跳过)。
+ *
+ * macOS 设计上不可行的诊断:
+ *   - osascript 是 LangCat 通过 spawn 启动的子进程
+ *   - macOS TCC(权限子系统)按 binary path 跟踪权限,osascript 是
+ *     /usr/bin/osascript 这个独立 binary,**不继承父进程 LangCat 的辅助功能权限**
+ *   - 用户即使在系统设置里把 LangCat 加进辅助功能,osascript 仍报
+ *     "不允許以 osascript 傳送按鍵 (1002)"
+ *   - 想绕开:要么把 /usr/bin/osascript 也加进辅助功能(脏 + 用户不该做),
+ *     要么改用 native helper(CGEventPost 直接走系统级事件,权限挂在 LangCat),
+ *     需要 Apple Developer ID 签名 + Swift/ObjC 编译,留给付费阶段
+ *
+ * MVP 阶段 macOS 工作流改成:
+ *   ① 选中词 → ② ⌘C 复制 → ③ ⌘+Shift+/ 弹释义
+ *   读纯剪贴板,2 步用户掌控,稳。
+ *
+ * Linux 仍用 xdotool(没有 TCC 限制,X11 上工作良好):
+ *   选中词 → Ctrl+Shift+/ = 直接弹(单步)
+ */
 function simulateCopy(): Promise<void> {
   return new Promise((resolve) => {
-    let cmd: string;
-    let args: string[];
-    if (process.platform === 'darwin') {
-      cmd = 'osascript';
-      args = ['-e', 'tell application "System Events" to keystroke "c" using command down'];
-    } else if (process.platform === 'linux') {
-      cmd = 'xdotool';
-      args = ['key', '--clearmodifiers', 'ctrl+c'];
-    } else {
-      // Windows 暂不模拟,直接 resolve
-      lastSimulateError = null;
+    if (process.platform !== 'linux') {
+      // macOS: TCC 拦死(见上方注释)→ 完全跳过,直接走剪贴板模式
+      // Windows: 暂未实现 PowerShell SendKeys → 同样剪贴板模式
       resolve();
       return;
     }
     try {
-      // 捕获 stderr — osascript 在 Accessibility 没授权时会写错误消息到 stderr
-      // (例如 "System Events got an error: osascript is not allowed to send keystrokes"),
-      // 之前 stdio:'ignore' 把这条关键诊断丢了,导致 silent fail
-      const proc = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-      let stderrBuf = '';
-      proc.stderr?.on('data', (chunk: Buffer) => {
-        stderrBuf += chunk.toString('utf8');
+      const proc = spawn('xdotool', ['key', '--clearmodifiers', 'ctrl+c'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
       let settled = false;
-      const finish = (err: string | null): void => {
+      const finish = (): void => {
         if (settled) return;
         settled = true;
-        lastSimulateError = err;
-        if (err) console.warn('[simulateCopy] failed:', err);
         resolve();
       };
-      proc.on('error', (e) => finish(`spawn ${cmd} 失败: ${e.message}`));
-      proc.on('exit', (code) => {
-        if (code === 0 && !stderrBuf) {
-          finish(null);
-        } else {
-          finish(
-            `${cmd} exit=${code}` +
-              (stderrBuf ? ` stderr=${stderrBuf.trim().slice(0, 300)}` : ''),
-          );
-        }
-      });
-      // 兜底超时 — Accessibility 没授权时 osascript 可能卡住等系统对话框
+      proc.on('error', () => finish());
+      proc.on('exit', () => finish());
       setTimeout(() => {
         if (settled) return;
         try { proc.kill(); } catch {}
-        finish(`${cmd} timeout (${SIMULATE_COPY_TIMEOUT_MS}ms)`);
+        finish();
       }, SIMULATE_COPY_TIMEOUT_MS);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      lastSimulateError = `spawn throw: ${msg}`;
-      console.warn('[simulateCopy] throw:', msg);
+    } catch {
       resolve();
     }
   });
 }
 
+/** macOS 工作流提示对话框只在每个进程生命周期内弹一次,避免每次没读到词都打扰 */
+let macWorkflowHelpShown = false;
+
 /**
- * macOS Accessibility 没授权时,显示一次性引导对话框 + 直跳系统设置面板。
+ * macOS:第一次按快捷键但剪贴板里不是英文词时,弹友好对话框教用户工作流。
  *
- * 触发条件:hotkey 触发时 simulateCopy 失败 + isTrustedAccessibilityClient 返 false。
- * 只弹一次(accessibilityHelpShown flag),避免每次按快捷键都打扰。
- *
- * 用户授权后**不需要重启 LangCat** —— macOS 实时生效,下次按快捷键就 work。
+ * 不再尝试自动模拟 Cmd+C(macOS TCC 设计上不让 child process 继承父进程辅助
+ * 功能权限,即使用户授权了 LangCat,osascript 子进程仍报 not-allowed)。
+ * 改成显式工作流引导:① 选 ② ⌘C ③ 快捷键。
  */
-function maybeShowAccessibilityHelp(): void {
+function maybeShowMacWorkflowHelp(): void {
   if (process.platform !== 'darwin') return;
-  if (accessibilityHelpShown) return;
-  // false = 只查询,不弹系统对话框(后者在 SIP 严格的版本上会卡住)
-  const trusted = systemPreferences.isTrustedAccessibilityClient(false);
-  if (trusted) return; // 已授权,不打扰
-  accessibilityHelpShown = true;
+  if (macWorkflowHelpShown) return;
+  macWorkflowHelpShown = true;
   void dialog
     .showMessageBox({
-      type: 'warning',
-      buttons: ['打开系统设置', '稍后'],
+      type: 'info',
+      buttons: ['知道了'],
       defaultId: 0,
-      cancelId: 1,
-      title: 'LangCat 需要辅助功能权限',
-      message: '快捷键没读到你选中的单词',
+      title: 'LangCat 查词工作流',
+      message: 'macOS 上选中即查需要先复制',
       detail:
-        '查词快捷键需要"辅助功能 (Accessibility)"权限才能模拟 ⌘+C 读取你选中的内容。\n\n' +
-        '请打开:系统设置 → 隐私与安全 → 辅助功能 → 把 LangCat 打开。\n\n' +
-        '授权后无需重启 LangCat,直接再按一次快捷键即可。',
-    })
-    .then(({ response }) => {
-      if (response === 0) {
-        void shell.openExternal(MAC_ACCESSIBILITY_PREF_URL);
-      }
+        '受 macOS 安全模型限制,LangCat 不能直接读你选中的内容。请用 3 步工作流:\n\n' +
+        '① 选中要查的英文词\n' +
+        '② 按 ⌘+C 复制到剪贴板\n' +
+        '③ 按 ⌘+Shift+/ 弹释义\n\n' +
+        '熟练后两步可以连按,跟 Spotlight 一样快。',
     });
 }
 
 async function tryHandleHotkey(): Promise<void> {
-  // 模拟系统 copy,等剪贴板传播再读
+  // Linux 上 xdotool 模拟 Ctrl+C(macOS 跳过,见 simulateCopy 注释)
   await simulateCopy();
   await new Promise((r) => setTimeout(r, CLIPBOARD_PROPAGATE_MS));
 
@@ -597,16 +579,10 @@ async function tryHandleHotkey(): Promise<void> {
     showPopoverFor(word);
     return;
   }
-  // 没读到合法英文词。三种可能:
-  //   1. macOS Accessibility 没授权 — simulateCopy 失败(lastSimulateError 非空)
-  //      → 弹 maybeShowAccessibilityHelp 引导授权
-  //   2. 用户没选词 / 选了非英文 / 选了多个词
-  //      → 用 lastQueriedWord "再看一眼" 上次查的(用户体验:误触发不至于啥都没)
-  //   3. 两者都中
-  //      → 先弹引导,再 fallback 到 lastQueriedWord
-  if (lastSimulateError !== null) {
-    maybeShowAccessibilityHelp();
-  }
+  // 没读到合法英文词:
+  //   - macOS 上第一次发生时,弹工作流引导(只弹一次)
+  //   - 然后用 lastQueriedWord "再看一眼" 上次查的,避免误触发完全没反馈
+  maybeShowMacWorkflowHelp();
   if (lastQueriedWord !== null) {
     showPopoverFor(lastQueriedWord);
   }

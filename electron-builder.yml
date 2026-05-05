@@ -27,6 +27,13 @@ mac:
   # 用 .icns(release.yml 跑 png2icons 从 icon.png 生成)— PNG 路径 macOS Dock
   # 不显示 logo,必须 .icns
   icon: build/icon.icns
+  # 强制 ad-hoc 签名(identity 设成 "-" 是 codesign 的 ad-hoc 标记)。
+  # 不设的话 electron-builder 在 GitHub Actions runner 上(没真证书)会
+  # 直接 skip codesign,产物 `codesign -dv` 报 "code object is not signed at all",
+  # macOS 13+ 严格模型下系统拒绝读 .icns,Dock 显示默认电子图标。
+  # ad-hoc 签名跟 Apple Developer ID 完全不同(用户首次启动仍要绕 Gatekeeper),
+  # 但能让系统正常读 Resources/Info.plist,Dock 上 logo 才会显示出来。
+  identity: '-'
   target:
     - target: dmg
       arch: [arm64, x64]
