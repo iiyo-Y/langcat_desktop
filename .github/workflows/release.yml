@@ -56,6 +56,21 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # 关键:把 git tag (例如 refs/tags/v0.1.1 → 0.1.1) 同步进 package.json version。
+      # electron-builder 用 package.json.version 拼 release tag 名(v0.1.0),
+      # 跟 push 上来的 git tag 不一致就会去找/创建错误的 release,产物 silent
+      # 上传到错误 tag,真实 v0.1.1 release 看不到东西。
+      - name: Sync package.json version with git tag
+        shell: bash
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG_NAME#v}"
+          echo "git tag = $TAG_NAME, version = $VERSION"
+          # --no-git-tag-version 防止 npm/pnpm 自动 commit + tag(workflow 里没用)
+          npm pkg set version="$VERSION"
+          echo "package.json now:"
+          npm pkg get version
+
       - name: Build (renderer + electron main)
         # build 时把生产 API URL + Supabase 公开 key inline 到 main bundle。
         # 这两个值都是公开的(API 接 Bearer + RLS 保护、anon key 设计上公开),
