@@ -1,0 +1,67 @@
+/**
+ * 全局样式入口
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family:
+    'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #1f2d4d;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* 主窗口:品牌蓝底,与 BrowserWindow.backgroundColor 一致,启动无白屏 */
+body.langcat-main {
+  background: #4f65f5;
+}
+
+/* Popover:背景透明,让 frameless+transparent 窗口的 alpha 通道生效 */
+body.langcat-popover {
+  background: transparent;
+}
+
+/* 自定义滚动条 —— 替换 OS 默认黑灰色丑陋滚动条
+ * 原则:平时半透明几乎隐形,hover 容器或滚动时显现品牌色
+ * Chromium / WebKit 用伪元素;Firefox 后备走 scrollbar-width/color */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(31, 45, 77, 0.25) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(31, 45, 77, 0.18);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(31, 45, 77, 0.45);
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* textarea 与 hover 区域允许文本选择 */
+textarea,
+[data-langcat-selectable='true'] {
+  user-select: text;
+}

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.env
+.env.*
+!.env.example
+!.env.local.example
+# 任何 .env 备份文件(防 mcp-sync 之类自动备份产生,常含完整 secret)
+.env.bak
+.env.bak.*
+.env.backup
+.env.backup.*
+.DS_Store
+*.log

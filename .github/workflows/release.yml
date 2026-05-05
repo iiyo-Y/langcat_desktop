@@ -1,0 +1,83 @@
+# 三平台并行打包 + 自动上传到 GitHub Releases
+#
+# 触发:推送 v* 这种 tag(由 `pnpm release` 脚本一键产生)
+#
+# 每个平台一个 runner 各打各的:
+# - macOS:   产 .dmg(arm64 + x64)
+# - Windows: 产 .exe(NSIS,x64)
+# - Linux:   产 .AppImage(x64)
+#
+# 产物会被 electron-builder 自动上传到对应 tag 的 GitHub Release,
+# 同时生成 latest{,-mac,-linux}.yml 给 electron-updater 读。
+#
+# 假设:本仓库根目录 == langcat_desktop/。如果把它纳入更大的 monorepo,
+# 给所有 step 加 `working-directory: langcat_desktop` 或调 paths。
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # 上传 release 资产 + 创建 release 必需
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-latest
+            platform: mac
+          - os: windows-latest
+            platform: win
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (renderer + electron main)
+        # build 时把生产 API URL + Supabase 公开 key inline 到 main bundle。
+        # 这两个值都是公开的(API 接 Bearer + RLS 保护、anon key 设计上公开),
+        # 但仍然走 GitHub Secrets 集中管理,改值不用动代码或 commit。
+        env:
+          VITE_LANGCAT_API_BASE_URL: ${{ secrets.LANGCAT_API_BASE_URL }}
+          VITE_LANGCAT_SUPABASE_URL: ${{ secrets.LANGCAT_SUPABASE_URL }}
+          VITE_LANGCAT_SUPABASE_ANON_KEY: ${{ secrets.LANGCAT_SUPABASE_ANON_KEY }}
+        run: pnpm build
+
+      - name: Package & publish
+        # --publish always:不管签名状态,产物都上传到对应 tag 的 release
+        # GH_TOKEN: GitHub Actions 自动注入,electron-builder 用它调 GitHub API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS 签名(将来准备好 Apple Developer ID 后填这两个 secret 即可)
+          # CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          # CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows 签名(将来准备好 .pfx 证书后填)
+          # WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          # WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: pnpm exec electron-builder --${{ matrix.platform }} --publish always --config electron-builder.yml

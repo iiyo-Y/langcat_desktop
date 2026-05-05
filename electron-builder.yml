@@ -1,0 +1,59 @@
+# electron-builder 跨平台打包配置
+#
+# 一键三平台:`pnpm package:all` 同时产出 macOS .dmg + Windows .exe + Linux .AppImage
+# 单平台:`pnpm package:mac` / `package:win` / `package:linux`
+#
+# 注意:
+# - macOS 包要在 macOS 上签名(没有签名的 .dmg 用户首次打开要绕 Gatekeeper)
+# - Windows 包要在 Windows 或 Linux + wine 上构建,生产签名需要 cert
+# - Linux 不签名,直接产出 AppImage(免安装)
+
+appId: app.langcat.desktop
+productName: LangCat
+copyright: Copyright © 2026 LangCat
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist
+  - dist-electron
+  - package.json
+
+mac:
+  category: public.app-category.education
+  icon: build/icon.png
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+
+linux:
+  icon: build/icon.png
+  category: Education
+  target:
+    - target: AppImage
+      arch: [x64]
+
+# 发布配置 —— 自动更新数据源
+#
+# provider: github 时 electron-builder 在打包后(--publish always)会上传产物到
+# 对应 tag 的 GitHub Release,并生成 latest{,-mac,-linux}.yml 给 electron-updater 读取。
+#
+# owner/repo 不显式写,由以下顺序自动推断:
+#   1. CI 环境变量 GITHUB_REPOSITORY(GitHub Actions 自动注入,推荐)
+#   2. package.json 的 repository 字段
+#   3. 本地 git remote origin
+#
+# 想换成 S3 / 腾讯云 / 自建 HTTPS 静态服务器时,把 provider 改成 generic 并填 url:
+#   - provider: generic
+#     url: https://download.langcat.example/desktop/
+publish:
+  - provider: github
+    releaseType: release
