@@ -35,7 +35,13 @@ mac:
   # 之前是 ad-hoc '-' 仅让 .icns 显示;现在 Apple Developer Program 已注册,
   # 走完整 Developer ID + 公证流程,Gatekeeper 不再警告,electron-updater
   # 可正常自动安装新版(这是 Apple 强约束:macOS 自动更新需要签名 + 公证)。
-  identity: 'Developer ID Application: LUO YI JIA (FVNGXL47JQ)'
+  #
+  # identity: null 让 electron-builder 自动从 keychain / CSC_LINK 解码后的
+  # .p12 里 detect 第一个 Developer ID Application 证书。我们 .p12 里只有一个
+  # Developer ID 证书(就是 LUO YI JIA / FVNGXL47JQ),自动选稳。
+  # 早版本写 'Developer ID Application: LUO YI JIA (FVNGXL47JQ)' 全名,
+  # electron-builder 25+ 改要求"不带 prefix",直接 null 跳过这种风格争议。
+  identity: null
   # Hardened Runtime — 公证(notarization)的强制要求,跟 entitlements 配套
   hardenedRuntime: true
   # 公证审核仍然让 build 直接产 dmg,不卡 spctl(本地 build 时 GitHub runner
