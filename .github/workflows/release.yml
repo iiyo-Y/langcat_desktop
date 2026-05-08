@@ -31,7 +31,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x64 + arm64(同一 ubuntu runner cross-build,native module 不参与 keystroke 路径,nut-js prebuild 全平台都有)
+          # Linux x64 + arm64(同一 ubuntu runner cross-build)
           - os: ubuntu-latest
             platform: linux
             arch: x64
@@ -45,16 +45,17 @@ jobs:
           - os: windows-latest
             platform: win
             arch: arm64
-          # ⚠️ macOS 拆两个 native runner,绕开 nut-js cross-arch prebuilt 缺失:
-          #   - macos-13 = Intel x64 native
-          #   - macos-14 = Apple Silicon arm64 native
-          # 之前 macos-latest 单 runner 跑 [arm64,x64] cross-build,host 一个 arch
-          # 时 nut-js 只装当前 arch prebuilt,build 另一 arch 时 .node 缺失静默失败,
-          # 产物只有一个 arch 上传,另一 arch 在 release 页消失。
-          - os: macos-13
+          # macOS x64 + arm64 都用 macos-latest(=macos-14 Apple Silicon)cross-build。
+          # 早期 v0.4.x 拆 macos-13(Intel)+ macos-14(Silicon)是为 nut-js native
+          # cross-arch prebuilt 缺失;v0.5.0 撤掉 nut-js 后纯 JS,cross-arch 无风险。
+          # 改用单 runner 出两 arch 的好处:
+          #   1. 避开 macos-13 deprecated runner queue 拥堵(几十分钟到几小时)
+          #   2. 共用 install / build 步,总 CI 时间更短
+          #   3. 公证只跑一次 polling,Apple notarytool 资源使用更轻
+          - os: macos-latest
             platform: mac
             arch: x64
-          - os: macos-14
+          - os: macos-latest
             platform: mac
             arch: arm64
 
