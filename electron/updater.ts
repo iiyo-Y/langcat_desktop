@@ -31,8 +31,14 @@ function getAutoUpdater(): AutoUpdater {
 }
 
 const UPDATER_CONFIG = {
-  /** 启动后多久首次检查(ms),给 UI 渲染让出资源 */
-  initialCheckDelayMs: 5000,
+  /**
+   * 启动后多久首次检查(ms)。
+   *
+   * 之前 5s,但国内网络环境下 GitHub Releases API 经常慢(被墙 / CDN 抖动),
+   * 5s check 后 fetch 偶尔卡 30-60s timeout,虽然不阻塞 UI 但 main 进程 event
+   * loop 占着拖慢整体响应。改 30s 给主窗 + popover 充分时间渲染稳定后再走网。
+   */
+  initialCheckDelayMs: 30 * 1000,
   /** 应用运行期间多久轮询一次(ms),默认 4 小时 */
   recurringCheckIntervalMs: 4 * 60 * 60 * 1000,
 } as const;

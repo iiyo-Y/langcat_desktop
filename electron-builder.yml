@@ -54,11 +54,11 @@ mac:
   # entitlements 已存在(build/entitlements.mac.plist),hardened runtime 必须配
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
-  # 启用公证 — electron-builder 25+ 用 notarytool,看 env APPLE_ID +
-  # APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID 自动跑;
-  # 公证通过后产物自带 ticket,首次打开无任何警告
-  notarize:
-    teamId: 'FVNGXL47JQ'
+  # 公证完全靠 release.yml 注入的 env:
+  #   APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID
+  # electron-builder 25+ 看到这三个 env 自动启用 notarytool。
+  # 不在 yml 里写 notarize.teamId(v0.6.7 build log 提示
+  # "Please specify ... in the APPLE_TEAM_ID env var instead of notarize.teamId")
   # 保留 macOS 原生 dark mode 适配能力(产品 UI 是品牌色,但 system-level
   # chrome 比如对话框/菜单栏仍跟随系统主题)
   darkModeSupport: true
