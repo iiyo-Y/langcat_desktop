@@ -63,6 +63,11 @@ contextBridge.exposeInMainWorld('langcat', {
     return ipcRenderer.invoke('langcat:list-morphemes');
   },
 
+  // 应用版本(对接 main app.getVersion(),返回当前装的真实 version 字符串)
+  appVersion(): Promise<string> {
+    return ipcRenderer.invoke('langcat:app-version');
+  },
+
   // —— 认证 ——
   authCurrent(): Promise<unknown> {
     return ipcRenderer.invoke('langcat:auth-current');

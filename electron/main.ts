@@ -915,6 +915,11 @@ app.whenReady().then(() => {
     }
   });
 
+  // 应用版本(从 package.json 读,electron 内置 API)。release.yml 在 build 前
+  // 把 git tag 写进 package.json version,所以这里返的就是当前装的真实版本号,
+  // 自动更新到新版后值会跟着变(无需改代码)。
+  ipcMain.handle('langcat:app-version', () => app.getVersion());
+
   ipcMain.handle('langcat:auth-current', () => auth.currentSession());
 
   ipcMain.handle('langcat:auth-sign-in', async (_e, payload: unknown) => {

@@ -10,6 +10,7 @@
  *(WebkitAppRegion:drag),按钮区 no-drag 让 click 不被吞。
  */
 
+import { useEffect, useState } from 'react';
 import type { Route } from './MainView';
 import type { AuthSessionPublic, QuotaEndpoint, QuotaInfo } from '@/types/bridge';
 
@@ -61,6 +62,20 @@ export function Sidebar({
   onAuthClick,
   quotas,
 }: Props): JSX.Element {
+  // 从 main 进程拿真实版本号(对应 release tag);自动更新到新版后值会跟着变
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    const lc = window.langcat;
+    if (!lc?.appVersion) return;
+    let cancelled = false;
+    void lc.appVersion().then((v) => {
+      if (!cancelled) setVersion(v);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <aside
       className="bg-langcat-brand w-52 shrink-0 flex flex-col border-r-2 border-langcat-outline/30"
@@ -126,7 +141,9 @@ export function Sidebar({
           <QuotaPanel quotas={quotas} />
         )}
 
-        <div className="px-3 text-langcat-white/45 text-[10px]">v0.1 · alpha</div>
+        <div className="px-3 text-langcat-white/45 text-[10px]">
+          {version ? `v${version} · alpha` : 'v… · alpha'}
+        </div>
       </div>
     </aside>
   );

@@ -50,6 +50,9 @@ export interface LangCatBridge {
   /** 词素全量列表(词根表视图用):返回 { data: { morphemes: [...], count: N } } */
   listMorphemes(): Promise<unknown>;
 
+  /** 当前装的应用版本号(对应 release tag,自动更新后会跟着变) */
+  appVersion(): Promise<string>;
+
   /** 当前登录态:登录返回 { user, expires_at },未登录返回 null */
   authCurrent(): Promise<AuthSessionPublic | null>;
   /** Supabase 邮箱密码登录;成功返回新 session,失败 reject 带错误消息 */
