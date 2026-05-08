@@ -10,7 +10,6 @@
  */
 
 import { useEffect, useState } from 'react';
-import type { Definition } from '@/types/word';
 import type {
   LangCatAIStatus,
   LangCatLookupFailure,
@@ -18,13 +17,6 @@ import type {
 } from '@lib/langcat-api';
 import type { SavedWord } from '@/types/vocabulary';
 import { AskAI } from './AskAI';
-
-/**
- * 付费层产品决策:popover 不显示 Free Dictionary 英文释义区块,
- * 让信息聚焦在 LangCat 自家词素拆解 + 多义项 + 记忆口诀 + 词源等高价值内容。
- * 免费层方案:把这个常量改成 false 即可,代码逻辑不变。
- */
-const HIDE_FREE_DICTIONARY = true;
 
 /**
  * 把 LLM 给的多义项字符串解析成结构化字段。约定格式:
@@ -79,18 +71,27 @@ function parseMeaningLine(line: string): {
   return { pos, cn, en, enCn };
 }
 
+// LookupState v2 — 已撤回 Free Dictionary 路径,只走 LangCat 自家词典
+//
+// 历史遗留:早版本同时调 Free Dictionary(英文释义)+ LangCat(词素拆解),
+// "Free Dictionary 404" 直接当 not-found(漏了 LangCat 是否命中)。
+// 现在 LangCat LLM 自动生成 + 自我增长,不再依赖 Free Dictionary。
+//
+// 状态语义:
+//   loading    — 查询中
+//   success    — LangCat 给出 morphology(命中)或 morphologyFailure(后端 ai_status:
+//                 disabled / rate_limited / failed_quality / failed_timeout / failed_other)
+//                 popover 据此渲染:命中显示拆解,失败显示对应提示 + 🔄 重试按钮
+//   error      — IPC 通信级错误(后端不可达 / 渲染层抛错)
 export type LookupState =
   | { kind: 'loading' }
   | {
       kind: 'success';
-      phonetic: string;
-      definitions: Definition[];
       /** LangCat 命中:有完整词素拆解 */
       morphology: LangCatLookupResult | null;
       /** LangCat 没命中且后端给了失败原因,popover 据此显示重试提示 */
       morphologyFailure: LangCatLookupFailure | null;
     }
-  | { kind: 'not-found' }
   | { kind: 'error'; message: string };
 
 interface Props {
@@ -133,11 +134,9 @@ export function WordPopover({
           <div className="text-langcat-outline text-2xl font-extrabold leading-tight tracking-tight">
             {word}
           </div>
-          {state.kind === 'success' && state.phonetic && (
-            <div className="text-langcat-outline/55 text-xs mt-1 font-mono">
-              {state.phonetic}
-            </div>
-          )}
+          {/* phonetic 之前来自 Free Dictionary,撤回后 LangCat 没存,所以不显示。
+              将来想加:db migration + dict_word_analyses 加 phonetic 字段 + LLM prompt
+              要求生成 IPA。 */}
         </div>
         {showRegen && (
           <button
@@ -204,11 +203,9 @@ export function WordPopover({
       <div className="flex-1 flex min-h-0">
         <div className="flex-1 overflow-auto px-5 pb-4 space-y-3 border-r-2 border-langcat-outline/15 min-w-0">
           {state.kind === 'loading' && <LoadingBody />}
-          {state.kind === 'not-found' && <NotFoundBody />}
           {state.kind === 'error' && <ErrorBody message={state.message} />}
           {state.kind === 'success' && (
             <SuccessBody
-              definitions={state.definitions}
               morphology={state.morphology}
               morphologyFailure={state.morphologyFailure}
             />
@@ -324,13 +321,9 @@ function LoadingBody(): JSX.Element {
   );
 }
 
-function NotFoundBody(): JSX.Element {
-  return (
-    <div className="bg-langcat-pale-blue/25 border-2 border-langcat-outline/30 rounded-langcat-small px-3 py-3 text-langcat-outline/80 text-sm">
-      该词不在 Free Dictionary 词典里。换个常见词试试 🐱
-    </div>
-  );
-}
+// NotFoundBody 已删除 —— 撤回 Free Dictionary 后,LangCat 找不到词的情况
+// 走 morphologyFailure → MorphologyFailureCard,不再有"该词不在 Free Dictionary
+// 词典里"这种过时文案。
 
 function ErrorBody({ message }: { message: string }): JSX.Element {
   return (
@@ -342,50 +335,19 @@ function ErrorBody({ message }: { message: string }): JSX.Element {
 }
 
 function SuccessBody({
-  definitions,
   morphology,
   morphologyFailure,
 }: {
-  definitions: Definition[];
   morphology: LangCatLookupResult | null;
   morphologyFailure: LangCatLookupFailure | null;
 }): JSX.Element {
   return (
     <>
-      {/* LangCat 自家词素拆解 —— 差异化能力放最顶部;命中时才显示 */}
+      {/* LangCat 自家词素拆解 —— 命中时显示完整拆解 */}
       {morphology && <MorphologySection result={morphology} />}
+      {/* LangCat 没命中:显示对应 ai_status 失败提示 + 引导用户点 🔄 重试 */}
       {!morphology && morphologyFailure && (
         <MorphologyFailureCard failure={morphologyFailure} />
-      )}
-
-      {/* Free Dictionary 英文释义 —— 付费层默认隐藏(信息聚焦在 LangCat 自家高价值字段) */}
-      {!HIDE_FREE_DICTIONARY && definitions.length > 0 && (
-        <ul className="space-y-2">
-          {definitions.map((d, idx) => (
-            <li
-              key={idx}
-              className="relative border-2 border-langcat-outline/30 bg-langcat-white rounded-langcat-small pl-4 pr-3 py-2.5"
-            >
-              <span
-                aria-hidden
-                className="absolute left-0 top-2 bottom-2 w-1 rounded-full bg-langcat-mouth"
-              />
-              <div className="flex items-start gap-2">
-                <span className="shrink-0 mt-0.5 inline-block bg-langcat-pale-blue/40 border border-langcat-outline/40 rounded-langcat-button px-2 py-[1px] text-[10px] font-bold text-langcat-outline">
-                  {d.partOfSpeech}
-                </span>
-                <span className="text-langcat-outline text-sm leading-relaxed flex-1">
-                  {d.meaning}
-                </span>
-              </div>
-              {d.example && (
-                <div className="mt-1.5 ml-1 pl-2 border-l-2 border-langcat-outline/20 text-langcat-outline/65 text-xs italic leading-relaxed">
-                  “{d.example}”
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
       )}
     </>
   );

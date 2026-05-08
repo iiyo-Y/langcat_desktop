@@ -11,7 +11,6 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { lookupDictionary } from '@lib/dictionary';
 import {
   lookupLangCatDictionary,
   regenerateLangCatDictionary,
@@ -19,9 +18,6 @@ import {
   type LangCatLookupResult,
   type LangCatLookupFailure,
 } from '@lib/langcat-api';
-import { HttpError } from '@lib/http';
-import { DICTIONARY_LIMITS } from '@config/constants';
-import type { Definition } from '@/types/word';
 import { WordPopover, type LookupState } from './WordPopover';
 
 interface ActiveWord {
@@ -113,26 +109,19 @@ export function PopoverView(): JSX.Element {
 /* ──────────────────────────────────────────────────────────── */
 
 async function runLookup(word: string): Promise<LookupState> {
-  const dictPromise = lookupDictionary(
-    word,
-    DICTIONARY_LIMITS.maxDefinitionsPerPos,
-  ).then(
-    (r) => ({ ok: true as const, ...r }),
-    (err: unknown) => ({ ok: false as const, err }),
-  );
-  // LangCat 自家词素查询 —— 正常返回 LangCatLookupReply,IPC 异常时返回 null
-  // 用 then(fulfilled, rejected) 的两参数形式 + 显式标注两路返回类型,
-  // 让 TS 推导 Promise 总类型为 LangCatLookupReply | null
-  const morphPromise = lookupLangCatDictionary(word).then(
-    (r): LangCatLookupReply | null => r,
-    (err: unknown): LangCatLookupReply | null => {
-      console.warn('[LangCat] morphology lookup IPC failed', err);
-      return null;
-    },
-  );
-
-  const [dict, morphReply] = await Promise.all([dictPromise, morphPromise]);
-  return mergeResults(dict, morphReply);
+  // 撤回 Free Dictionary,只走 LangCat 自家词典(LLM 自动生成 + 自我增长)。
+  // IPC 通信级异常 → error;LangCat 后端给出失败 ai_status → success +
+  // morphologyFailure(让 popover 显示对应提示 + 🔄 重试)。
+  try {
+    const reply = await lookupLangCatDictionary(word);
+    if (reply.ok) {
+      return { kind: 'success', morphology: reply.result, morphologyFailure: null };
+    }
+    return { kind: 'success', morphology: null, morphologyFailure: reply.failure };
+  } catch (err: unknown) {
+    console.warn('[LangCat] morphology lookup IPC failed', err);
+    return { kind: 'error', message: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 function splitMorphReply(reply: LangCatLookupReply | null): {
@@ -142,30 +131,4 @@ function splitMorphReply(reply: LangCatLookupReply | null): {
   if (!reply) return { result: null, failure: null };
   if (reply.ok) return { result: reply.result, failure: null };
   return { result: null, failure: reply.failure };
-}
-
-function mergeResults(
-  dict:
-    | { ok: true; phonetic: string; definitions: Definition[] }
-    | { ok: false; err: unknown },
-  morphReply: LangCatLookupReply | null,
-): LookupState {
-  if (!dict.ok) {
-    if (dict.err instanceof HttpError && dict.err.status === 404) {
-      return { kind: 'not-found' };
-    }
-    return { kind: 'error', message: errMsg(dict.err) };
-  }
-  const split = splitMorphReply(morphReply);
-  return {
-    kind: 'success',
-    phonetic: dict.phonetic,
-    definitions: dict.definitions,
-    morphology: split.result,
-    morphologyFailure: split.failure,
-  };
-}
-
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }
