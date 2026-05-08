@@ -119,12 +119,17 @@ jobs:
         # GH_TOKEN: GitHub Actions 自动注入,electron-builder 用它调 GitHub API
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS 签名(将来准备好 Apple Developer ID 后填这两个 secret 即可)
-          # CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          # CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          # APPLE_ID: ${{ secrets.APPLE_ID }}
-          # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # ─────────── macOS 签名 + 公证(Apple Developer ID) ───────────
+          # 仅 macOS job 有效;Windows / Linux 上这些 env 是空字符串,无副作用。
+          # CSC_LINK = .p12 base64(APPLE_CSC_LINK 已加 GitHub Secret)
+          # CSC_KEY_PASSWORD = .p12 解密密码
+          # APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID:notarytool 三件套
+          # electron-builder 25+ 看到这些 env 就会自动启用 notarize,无需 yml 显式开
+          CSC_LINK: ${{ secrets.APPLE_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Windows 签名(将来准备好 .pfx 证书后填)
           # WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           # WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}

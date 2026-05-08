@@ -31,45 +31,35 @@ mac:
   # 用 .icns(release.yml 跑 png2icons 从 icon.png 生成)— PNG 路径 macOS Dock
   # 不显示 logo,必须 .icns
   icon: build/icon.icns
-  # 强制 ad-hoc 签名(identity 设成 "-" 是 codesign 的 ad-hoc 标记)。
-  # 不设的话 electron-builder 在 GitHub Actions runner 上(没真证书)会
-  # 直接 skip codesign,产物 `codesign -dv` 报 "code object is not signed at all",
-  # macOS 13+ 严格模型下系统拒绝读 .icns,Dock 显示默认电子图标。
-  # ad-hoc 签名跟 Apple Developer ID 完全不同(用户首次启动仍要绕 Gatekeeper),
-  # 但能让系统正常读 Resources/Info.plist,Dock 上 logo 才会显示出来。
-  identity: '-'
+  # 真实 Developer ID Application 签名(Apple 颁发的证书,Team ID FVNGXL47JQ)。
+  # 之前是 ad-hoc '-' 仅让 .icns 显示;现在 Apple Developer Program 已注册,
+  # 走完整 Developer ID + 公证流程,Gatekeeper 不再警告,electron-updater
+  # 可正常自动安装新版(这是 Apple 强约束:macOS 自动更新需要签名 + 公证)。
+  identity: 'Developer ID Application: LUO YI JIA (FVNGXL47JQ)'
+  # Hardened Runtime — 公证(notarization)的强制要求,跟 entitlements 配套
+  hardenedRuntime: true
+  # 公证审核仍然让 build 直接产 dmg,不卡 spctl(本地 build 时 GitHub runner
+  # 不一定能 reach Apple,gatekeeperAssess 关掉避开非关键检查)
+  gatekeeperAssess: false
+  # entitlements 已存在(build/entitlements.mac.plist),hardened runtime 必须配
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # 启用公证 — electron-builder 25+ 用 notarytool,看 env APPLE_ID +
+  # APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID 自动跑;
+  # 公证通过后产物自带 ticket,首次打开无任何警告
+  notarize:
+    teamId: 'FVNGXL47JQ'
+  # 保留 macOS 原生 dark mode 适配能力(产品 UI 是品牌色,但 system-level
+  # chrome 比如对话框/菜单栏仍跟随系统主题)
+  darkModeSupport: true
   target:
     - target: dmg
       arch: [arm64, x64]
-  # ─────────────────────────────────────────────────────────────
-  # 不签名场景下的 macOS 关键开关(我们没付 $99 Apple Developer Program)
-  # ─────────────────────────────────────────────────────────────
-  # hardened runtime:Apple 强化运行时,要求所有 dylib 必须签名 + notarized。
-  # 没签名硬开会让 macOS 13+ 直接拒绝启动(报 "代码签名无效")。
-  # 真正签名时再翻成 true。
-  hardenedRuntime: false
-  # 跳过 electron-builder 内部对 dmg 做 spctl Gatekeeper 评估
-  # —— 在没签名的 macOS runner 上 build 会因 spctl 校验失败而中断。
-  gatekeeperAssess: false
-  # entitlements:即使不签名,Info.plist 的 Usage Description + entitlements
-  # 仍是 osascript / Accessibility 等系统对话框的合法依据。
-  entitlements: build/entitlements.mac.plist
-  entitlementsInherit: build/entitlements.mac.plist
-  # 保留 macOS 原生 dark mode 适配能力(产品本身是品牌色,但系统级 chrome
-  # 例如菜单栏/对话框仍跟随系统主题)
-  darkModeSupport: true
-  # ─────────────────────────────────────────────────────────────
-  # 自定义 Info.plist 字段(extendInfo 会 merge 到产物的 Info.plist)
-  # ─────────────────────────────────────────────────────────────
+  # 自定义 Info.plist 字段
   extendInfo:
-    # 显式声明这是一个普通 Dock app(不是 menu bar agent)
-    # 改成 true 会让窗口/Dock 图标消失,变成 status bar app —— 我们不要
+    # 显式声明这是一个普通 Dock app(不是 menu bar agent)。改成 true 会让
+    # 窗口 / Dock 图标消失变成 status bar app —— LangCat 不要那种行为
     LSUIElement: false
-    # ⚠️ 关键:osascript 模拟 Cmd+C 必须有这条 Usage Description,
-    # 否则 macOS 拒绝弹"允许控制其他应用"对话框,功能直接不可用。
-    NSAppleEventsUsageDescription: "LangCat 需要在你按下查词快捷键时,模拟一次 Cmd+C 复制你选中的单词。授权后才能让“选中即查”流畅工作。"
-    # 显式声明本 app 会跑 AppleScript / Apple Events
-    NSAppleScriptEnabled: true
 
 # ─────────────────────────────────────────────────────────────
 # DMG 视觉:用户双击 .dmg 后看到的安装窗口
