@@ -41,7 +41,11 @@ mac:
   # Developer ID 证书(就是 LUO YI JIA / FVNGXL47JQ),自动选稳。
   # 早版本写 'Developer ID Application: LUO YI JIA (FVNGXL47JQ)' 全名,
   # electron-builder 25+ 改要求"不带 prefix",直接 null 跳过这种风格争议。
-  identity: null
+  # 不设 identity 字段:让 electron-builder 默认行为 = 从当前 default keychain
+  # 自动找 Developer ID Application 证书。release.yml 的 manual keychain setup
+  # 已经把证书 import 到 build.keychain 并设为 default,electron-builder 自动命中。
+  # 注意:identity: null 不等于"自动 detect",是"显式跳过签名"——v0.6.x 这个 bug 源头
+  #
   # Hardened Runtime — 公证(notarization)的强制要求,跟 entitlements 配套
   hardenedRuntime: true
   # 公证审核仍然让 build 直接产 dmg,不卡 spctl(本地 build 时 GitHub runner
@@ -59,8 +63,10 @@ mac:
   # chrome 比如对话框/菜单栏仍跟随系统主题)
   darkModeSupport: true
   target:
+    # 不写 arch,让 release.yml 的 CLI --arch 决定(matrix 里每 job 单 arch);
+    # 之前 yml 写 [arm64, x64] 不被 CLI override,导致同 job build 两次,
+    # hdiutil mount 同名 volume "LangCat 0.6.x" race detach 失败
     - target: dmg
-      arch: [arm64, x64]
   # 自定义 Info.plist 字段
   extendInfo:
     # 显式声明这是一个普通 Dock app(不是 menu bar agent)。改成 true 会让
@@ -91,18 +97,15 @@ win:
   # 同理 NSIS installer 要 .ico
   icon: build/icon.ico
   target:
+    # arch 完全交 CLI --arch(同 mac block 注释)
     - target: nsis
-      # x64 主流;arm64 给 Surface Pro X / 高通 Snapdragon X / Copilot+ PC;
-      # ia32 故意不加 —— Win 32-bit 用户已极少,产物多 50% 体积不值
-      arch: [x64, arm64]
 
 linux:
   icon: build/icon.png
   category: Education
   target:
+    # arch 完全交 CLI --arch
     - target: AppImage
-      # x64 桌面主流;arm64 给 ARM 服务器 / Raspberry Pi 5 / Apple Silicon Linux 虚拟机
-      arch: [x64, arm64]
 
 # 发布配置 —— 自动更新数据源
 #
