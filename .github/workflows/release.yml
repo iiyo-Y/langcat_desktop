@@ -115,6 +115,25 @@ jobs:
           VITE_LANGCAT_SUPABASE_ANON_KEY: ${{ secrets.LANGCAT_SUPABASE_ANON_KEY }}
         run: pnpm build
 
+      # 仅 macOS:打印签名 secrets 是否注入(只看长度,值被 GitHub mask 不会暴露)
+      # 排查 .p12 base64 被换行截断 / secret 没传到 build step 等问题
+      - name: Debug Apple secrets presence (macOS only, length only)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          DBG_CSC_LINK: ${{ secrets.APPLE_CSC_LINK }}
+          DBG_CSC_KEY_PASSWORD: ${{ secrets.APPLE_CSC_KEY_PASSWORD }}
+          DBG_APPLE_ID: ${{ secrets.APPLE_ID }}
+          DBG_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          DBG_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          echo "CSC_LINK length: ${#DBG_CSC_LINK} chars (期望 5800+;< 100 = 没注入)"
+          echo "CSC_KEY_PASSWORD length: ${#DBG_CSC_KEY_PASSWORD} chars (期望 11)"
+          echo "APPLE_ID length: ${#DBG_APPLE_ID} chars (期望 18 for jeremieyuk@qq.com)"
+          echo "APPLE_APP_SPECIFIC_PASSWORD length: ${#DBG_APPLE_APP_SPECIFIC_PASSWORD} chars (期望 19 含短横线)"
+          echo "APPLE_TEAM_ID length: ${#DBG_APPLE_TEAM_ID} chars (期望 10)"
+          echo "CSC_LINK first/last 8 base64 chars: ${DBG_CSC_LINK:0:8}...${DBG_CSC_LINK: -8}"
+
       - name: Package & publish
         # --publish always:不管签名状态,产物都上传到对应 tag 的 release
         # GH_TOKEN: GitHub Actions 自动注入,electron-builder 用它调 GitHub API
