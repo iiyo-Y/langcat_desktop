@@ -66,7 +66,10 @@ mac:
     # 不写 arch,让 release.yml 的 CLI --arch 决定(matrix 里每 job 单 arch);
     # 之前 yml 写 [arm64, x64] 不被 CLI override,导致同 job build 两次,
     # hdiutil mount 同名 volume "LangCat 0.6.x" race detach 失败
-    - target: dmg
+    - target: dmg     # 用户首次下载 / 手动安装用
+    - target: zip     # ⚠️ electron-updater 在 macOS 上自动更新**必须** .zip
+                      # 不是 .dmg!没 zip 时 v0.6.8 之前升级永远报
+                      # ERR_UPDATER_ZIP_FILE_NOT_FOUND silent skip。
   # 自定义 Info.plist 字段
   extendInfo:
     # 显式声明这是一个普通 Dock app(不是 menu bar agent)。改成 true 会让
